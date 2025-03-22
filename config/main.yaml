@@ -1,0 +1,130 @@
+defaults:
+    - dataset: re10k
+  #- optional dataset/view_sampler_dataset_specific_config: ${dataset/view_sampler}_${dataset}
+
+wandb:
+  project: mvsplat
+  entity: yuyz
+  name: placeholder
+  mode: online
+  id: null
+
+mode: train
+
+dataset:
+  overfit_to_scene: null
+
+data_loader:
+  # Avoid having to spin up new processes to print out visualizations.
+  train:
+    num_workers: 16
+    persistent_workers: true
+    batch_size: 1
+    seed: 1234
+  test:
+    num_workers: 4
+    persistent_workers: false
+    batch_size: 1
+    seed: 2345
+  val:
+    num_workers: 1
+    persistent_workers: true
+    batch_size: 1
+    seed: 3456
+
+optimizer:
+  lr: 1.5e-4
+  warm_up_steps: 2000
+  cosine_lr: false
+
+checkpointing:
+  load: null
+  every_n_train_steps: 5000  # 5000
+  save_top_k: 2
+  pretrained_model: null
+
+train:
+  depth_mode: null
+  extended_visualization: false
+  print_log_every_n_steps: 1
+
+test:
+  output_path: outputs/test
+  compute_scores: false
+  eval_time_skip_steps: 0
+  save_image: true
+  save_video: true
+
+seed: 111123
+
+trainer:
+  max_steps: -1
+  val_check_interval: 1000
+  gradient_clip_val: 0.5
+  num_sanity_val_steps: 2
+  check_val_every_n_epoch: None
+
+output_dir: null
+
+diffusion: 
+  conditioning_dropout_prob: 0.1
+  single_view: False
+  train_super_resolution: False
+  super_resolution: True
+  gt_num: 1
+  base_model_path: "dataset/checkpoint/MVD_weights"
+  val_dir: "/dataset/htx/see4d/warps/outputs/purse"
+  source_imgs_dir: ""
+  warp_root_dir: ""
+  snr_gamma: null
+  pretrained_model_name_or_path: "stabilityai/stable-video-diffusion-img2vid-xt"
+  unet_config: "diffusion/unet_configs/unet_cam_ray.json"
+  pixelsplat_path:  "checkpoints/re10k.ckpt" # "checkpoints/pixelsplat_re10k_300k.ckpt"
+  per_gpu_batch_size: ${data_loader.train.batch_size}
+  gradient_accumulation_steps: 2
+  gradient_checkpointing: true
+  max_train_steps: 300000
+  num_frames: 14
+  width: 512
+  height: 512
+  checkpointing_steps: 2000
+  checkpoints_total_limit: 1
+  learning_rate: 1.0e-5
+  lr_warmup_steps: 0
+  seed: null # this will help to auto restart the code with different data
+  mixed_precision: "fp16"
+  validation_steps: 1000
+  num_validation_images: 5
+  output_dir: "/dataset/htx/see4d/outputs/"
+  num_workers: ${data_loader.train.num_workers}
+  resume_from_checkpoint: latest
+
+  datasets_cfg:
+    type: "single"
+    datasets:
+      - name: ${dataset.name}
+        image_shape: ${dataset.image_shape}
+        background_color: ${dataset.background_color}
+        cameras_are_circular: ${dataset.cameras_are_circular}
+        overfit_to_scene: ${dataset.overfit_to_scene}
+        view_sampler: ${dataset.view_sampler}
+        baseline_epsilon: ${dataset.baseline_epsilon}
+        max_fov: ${dataset.max_fov}
+        make_baseline_1: ${dataset.make_baseline_1}
+        augment: ${dataset.augment}
+        test_len: ${dataset.test_len}
+        test_chunk_interval: ${dataset.test_chunk_interval}
+        skip_bad_shape: ${dataset.skip_bad_shape}
+        near: ${dataset.near}
+        far: ${dataset.far}
+        baseline_scale_bounds: ${dataset.baseline_scale_bounds}
+        shuffle_val: ${dataset.shuffle_val}
+        data_shape: [360, 640]
+        roots: [datasets/re10k]
+        
+evaluator:
+  loss:
+    lambda_lpips: 0.1
+  optim:
+    position_lr_init: 0.00016
+  max_iterations: 200
