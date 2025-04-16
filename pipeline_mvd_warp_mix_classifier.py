@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import inspect
+import imageio
 import numpy as np
 from typing import Callable, List, Optional, Union
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor,CLIPVisionModelWithProjection
@@ -514,6 +515,7 @@ class MVDreamPipeline(DiffusionPipeline):
         prompt: str = "",# 'a cute owl'
         image: Optional[np.ndarray] = None,# NOne
         masks: Optional[np.ndarray] = None,# NOne
+        input=None,
         height: int = 256,# 256
         width: int = 256,# 256
         elevation: float = 0,# 0
@@ -539,16 +541,16 @@ class MVDreamPipeline(DiffusionPipeline):
         self.vae = self.vae.to(device=device)
         self.text_encoder = self.text_encoder.to(device=device)
         weight_dtype = next(self.vae.parameters()).dtype
-        self.guidance_rescale = guidance_rescale
+        self.guidance_rescale = guidance_rescale#0.0
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
         # corresponds to doing no classifier free guidance.
         # do_classifier_free_guidance = guidance_scale > 1.0
-        do_classifier_free_guidance = (guidance_scale != 0.0)
+        do_classifier_free_guidance = (guidance_scale != 0.0)#True
         
         # Prepare timesteps
-        self.scheduler.set_timesteps(num_inference_steps, device=device)# DDIMScheduler
+        self.scheduler.set_timesteps(num_inference_steps, device=device)#50 DDIMScheduler
         timesteps = self.scheduler.timesteps
         # import pdb;pdb.set_trace()
         if self.scheduler.timestep_scaling == "trailing":
@@ -560,16 +562,21 @@ class MVDreamPipeline(DiffusionPipeline):
             image = rearrange(image, "b f c h w -> (b f) c h w", f=num_frames)
             img_latents = self.vae.encode(image.to(weight_dtype).to(device)).latent_dist.sample()
             img_latents = img_latents * self.vae.config.scaling_factor # [b*f, c, h, w] shape=[6, 4, 32, 32]
+            # input = rearrange(input, "b f c h w -> (b f) c h w", f=num_frames)
+            # input_latent = self.vae.encode(input.to(weight_dtype).to(device)).latent_dist.sample()
+            # input_latent = input_latent * self.vae.config.scaling_factor # [b*f, c, h, w] shape=[6, 4, 32, 32]
+            
             # import pdb;pdb.set_trace()
             # img_latents[:gt_num] = img_latents[:gt_num] * self.vae.config.scaling_factor
-        if gt_frame is not None:    
-            image_gt = rearrange(gt_frame, "b f c h w -> (b f) c h w", f=num_frames)
-            img_latents_gt = self.vae.encode(image_gt.to(weight_dtype).to(device)).latent_dist.sample()
-            img_latents_gt = img_latents_gt * self.vae.config.scaling_factor # [b*f, c, h, w] shape=[6, 4, 32, 32]
+        # if gt_frame is not None:    
+        #     image_gt = rearrange(gt_frame, "b f c h w -> (b f) c h w", f=num_frames)
+        #     img_latents_gt = self.vae.encode(image_gt.to(weight_dtype).to(device)).latent_dist.sample()
+        #     img_latents_gt = img_latents_gt * self.vae.config.scaling_factor # [b*f, c, h, w] shape=[6, 4, 32, 32]
         
         self.image_encoder = self.image_encoder.to(device=device)
         image_embeds_neg, image_embeds_pos = self.encode_image(image, device, num_images_per_prompt) 
-        image_embeds_pos = image_embeds_pos[0:1]
+        image_embeds_pos = image_embeds_pos[0:1]#only fetch first image
+        # image_embeds_pos = image_embeds_pos[:gt_num]#only fetch first image
         
         # import pdb;pdb.set_trace()
         if masks is not None:
@@ -605,22 +612,22 @@ class MVDreamPipeline(DiffusionPipeline):
             device,
             generator,
             latents=None,
-        )# shape=[3, 4, 32, 32]
+        )# shape=[16, 4, 32, 32]
         
         
-        
+    
         noise_scheduler = self.scheduler
-        if gt_frame is not None:
-            noise_gt = torch.randn_like(img_latents)
-            # t = timesteps[0]
-            t = 999
-            tt = torch.tensor([t] * actual_num_frames, dtype=img_latents.dtype, device=device)
-            noisy_latents = noise_scheduler.add_noise(img_latents_gt, noise_gt, tt.long())
+        # if gt_frame is not None:
+        #     noise_gt = torch.randn_like(img_latents)
+        #     # t = timesteps[0]
+        #     t = 999
+        #     tt = torch.tensor([t] * actual_num_frames, dtype=img_latents.dtype, device=device)
+        #     noisy_latents = noise_scheduler.add_noise(img_latents_gt, noise_gt, tt.long())
         
 
         latents = torch.cat([img_latents[:gt_num], noisy_latents[gt_num:]], dim=0)
         
-        camera = None
+        # camera = None
 
         # Prepare extra step kwargs.
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
@@ -630,33 +637,35 @@ class MVDreamPipeline(DiffusionPipeline):
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
 
         time_ratio = 5
-        timestep_warp = (timesteps[0]//time_ratio).long()
-        noise_warp = torch.randn_like(noisy_latents)
-        tt = torch.tensor([timestep_warp] * actual_num_frames, dtype=noisy_latents.dtype, device=device)
-        noisy_latents_warp = noise_scheduler.add_noise(img_latents, noise_warp, tt.long()) 
+        # timestep_warp = (timesteps[0]//time_ratio).long()
+        # noise_warp = torch.randn_like(noisy_latents)
+        # tt = torch.tensor([timestep_warp] * actual_num_frames, dtype=noisy_latents.dtype, device=device)
+        # noisy_latents_warp = noise_scheduler.add_noise(img_latents, noise_warp, tt.long()) 
    
         
-        mix_latents_warp = torch.cat([img_latents[:gt_num], noisy_latents_warp[gt_num:]], dim=0)
+        # mix_latents_warp = torch.cat([img_latents[:gt_num], noisy_latents_warp[gt_num:]], dim=0)
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                
                 # expand the latents if we are doing classifier free guidance
                 multiplier = 2 if do_classifier_free_guidance else 1
                 
                 latents = torch.cat([img_latents[:gt_num], latents[gt_num:]], dim=0)# [6, 4, 32, 32]
                 
                 timestep_warp = (t//time_ratio).long()
+                # timestep_warp = (t).long()
                 noise_warp = torch.randn_like(noisy_latents)
                 tt = torch.tensor([timestep_warp] * actual_num_frames, dtype=noisy_latents.dtype, device=device)
                 noisy_latents_warp = noise_scheduler.add_noise(img_latents, noise_warp, tt.long())
+
                 weights = custom_decay_function_weight(tt.float())
 
                 weights = weights.view(tt.shape[0], 1, 1, 1).to(noisy_latents_warp.dtype)
                 noisy_latents_warp_weight = weights * noisy_latents_warp + (1. - weights) * latents
                 mix_latents_warp = torch.cat([img_latents[:gt_num], noisy_latents_warp_weight[gt_num:]], dim=0) 
 
-                #print(mask_latents)
-                #assert False
+                # mix_latents_warp = torch.cat([img_latents[:gt_num], noisy_latents_warp[gt_num:]], dim=0) 
                 
                 if self.unet.input_blocks[0].__dict__['_modules']['0'].__dict__['in_channels'] == 9:
                     latents = torch.cat([latents, mix_latents_warp, mask_latents], dim=1)# [b*f, c, h, w] shape=[6, 9, 32, 32]
@@ -677,10 +686,15 @@ class MVDreamPipeline(DiffusionPipeline):
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 image_embeds_pos_input = image_embeds_pos.repeat(multiplier,1,1)
+
+                # image_embeds_pos_input = image_embeds_pos.repeat(multiplier*(actual_num_frames//gt_num),1,1)
+                # context = (prompt_embeds.repeat(actual_num_frames,1,1)+ image_embeds_pos_input).to(dtype=latent_model_input.dtype)
+
                 unet_inputs = {
                     'x': latent_model_input,# torch.Size([num_frames, 5, 32, 32])
                     'timesteps': torch.tensor([t] * actual_num_frames * multiplier, dtype=latent_model_input.dtype, device=device),# torch.Size([num_frames])
                     'context': (prompt_embeds + image_embeds_pos_input).repeat(actual_num_frames,1,1).to(dtype=latent_model_input.dtype),
+                    # 'context': context,
                     'num_frames': actual_num_frames,# 4
                     'camera': None,# 
                 }
@@ -703,6 +717,26 @@ class MVDreamPipeline(DiffusionPipeline):
                 latents: torch.Tensor = self.scheduler.step(
                     noise_pred[:,:4], t, latents[:, :4], **extra_step_kwargs, return_dict=False
                 )[0]
+
+                # latents, x0 = self.scheduler.step(
+                #     noise_pred[:,:4], t, latents[:, :4], **extra_step_kwargs, return_dict=False
+                # )
+
+                # pred_latents = 1 / self.vae.config.scaling_factor * latents
+                # image = self.vae.decode(pred_latents.to(self.vae.dtype)).sample
+                # image = (image / 2 + 0.5).clamp(0, 1)
+                # image = image*255.0
+                # image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+                # image = image.astype(np.uint8)
+                # imageio.mimwrite(f'vis_step/test_{tt[0].item()}_xt.mp4', list(image))
+
+                # pred_latents = 1 / self.vae.config.scaling_factor * x0
+                # image = self.vae.decode(pred_latents.to(self.vae.dtype)).sample
+                # image = (image / 2 + 0.5).clamp(0, 1)
+                # image = image*255.0
+                # image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+                # image = image.astype(np.uint8)
+                # imageio.mimwrite(f'vis_step/test_{tt[0].item()}_x0.mp4', list(image))
                 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or (
@@ -719,8 +753,9 @@ class MVDreamPipeline(DiffusionPipeline):
         elif output_type == "pil":
             image = self.decode_latents(latents)
             image = self.numpy_to_pil(image)
-            image_warp = self.decode_latents(noisy_latents_warp)
-            image_warp = self.numpy_to_pil(image_warp)
+            # image_warp = self.decode_latents(noisy_latents_warp)
+            # image_warp = self.numpy_to_pil(image_warp)
+
         else: # numpy
             image = self.decode_latents(latents)
             image_warp = self.decode_latents(noisy_latents_warp)
@@ -729,4 +764,4 @@ class MVDreamPipeline(DiffusionPipeline):
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
             self.final_offload_hook.offload()
 
-        return image, image_warp
+        return image

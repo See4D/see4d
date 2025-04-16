@@ -3,9 +3,9 @@ defaults:
   #- optional dataset/view_sampler_dataset_specific_config: ${dataset/view_sampler}_${dataset}
 
 wandb:
-  project: mvsplat
-  entity: yuyz
-  name: placeholder
+  project: See4d
+  entity: nuslud
+  name: overfit_singledata15sample
   mode: online
   id: null
 
@@ -67,12 +67,13 @@ trainer:
 output_dir: null
 
 diffusion: 
+  dataset_root: "/dataset/yyzhao/Sync4D"
   conditioning_dropout_prob: 0.1
-  single_view: False
+  single_view: True
   train_super_resolution: False
   super_resolution: True
   gt_num: 1
-  base_model_path: "dataset/checkpoint/MVD_weights"
+  base_model_path: "checkpoint/MVD_weights"
   val_dir: "/dataset/htx/see4d/warps/outputs/purse"
   source_imgs_dir: ""
   warp_root_dir: ""
@@ -81,7 +82,7 @@ diffusion:
   unet_config: "diffusion/unet_configs/unet_cam_ray.json"
   pixelsplat_path:  "checkpoints/re10k.ckpt" # "checkpoints/pixelsplat_re10k_300k.ckpt"
   per_gpu_batch_size: ${data_loader.train.batch_size}
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   gradient_checkpointing: true
   max_train_steps: 300000
   num_frames: 14
@@ -93,14 +94,16 @@ diffusion:
   lr_warmup_steps: 0
   seed: null # this will help to auto restart the code with different data
   mixed_precision: "fp16"
-  validation_steps: 1000
+  validation_steps: 100
   num_validation_images: 5
-  output_dir: "/dataset/htx/see4d/outputs/"
+  output_dir: "/data/dylu/project/see4d/outputs"
   num_workers: ${data_loader.train.num_workers}
   resume_from_checkpoint: latest
 
   datasets_cfg:
     type: "single"
+    # prob: [3.0, 3.0, 1.0] 
+    prob: [1.0] 
     datasets:
       - name: ${dataset.name}
         image_shape: ${dataset.image_shape}

@@ -19,12 +19,16 @@ from transformers import CLIPTextModel, CLIPTokenizer, CLIPImageProcessor, CLIPV
 class mvdream_diffusion_model:
     def __init__(self, base_model_path,mv_unet_path,tokenizer,seed=12345):
 
-        generator = torch.Generator("cuda").manual_seed(seed)
+        # generator = torch.Generator("cuda").manual_seed(seed)
         
+        # config = MultiViewUNetModel.load_config(mv_unet_path, subfolder="unet")
+        # self.unet = MultiViewUNetModel.from_config(config)
 
         self.unet = MultiViewUNetModel.from_pretrained(
             mv_unet_path,
-            torch_dtype=torch.float32
+            torch_dtype=torch.float32,
+            low_cpu_mem_usage=False,
+            device_map=None,
         )
         feature_extractor: CLIPImageProcessor = CLIPImageProcessor.from_pretrained(base_model_path + "/CLIP-ViT-H-14-laion2B-s32B-b79K")
         image_encoder: CLIPVisionModelWithProjection = CLIPVisionModelWithProjection.from_pretrained(base_model_path + "/CLIP-ViT-H-14-laion2B-s32B-b79K")
@@ -52,14 +56,16 @@ class mvdream_diffusion_model:
     def inference_next_frame(self, prompt, batch, num_frames, height, width, gt_num_frames=1, output_type='pil'):
         batch['conditioning_pixel_values'] = torch.unsqueeze(batch['conditioning_pixel_values'], 0)
         batch['masks'] = torch.unsqueeze(batch['masks'], 0)
+        batch['input'] = torch.unsqueeze(batch['input'], 0)
 
-        image, image_warp = self.pipe(
+        image = self.pipe(
             prompt=prompt,
             image=batch['conditioning_pixel_values'],
             masks=batch['masks'],
+            input=batch['input'],   
             height=height,
             width=width,
-            guidance_scale=2.0,
+            guidance_scale=0.0,
             # guidance_scale=1.0,
             num_inference_steps=50, 
             guidance_rescale=0.0,

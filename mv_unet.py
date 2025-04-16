@@ -10,7 +10,8 @@ from einops import rearrange, repeat
 
 from diffusers.configuration_utils import ConfigMixin
 from diffusers.models.modeling_utils import ModelMixin
-
+from diffusers.models.activations import get_activation
+from model_utils import auto_grad_checkpoint
 # require xformers!
 import xformers
 import xformers.ops
@@ -105,6 +106,59 @@ def default(val, d):
     if val is not None:
         return val
     return d() if isfunction(d) else d
+
+def get_timestep_embedding(
+    timesteps: torch.Tensor,
+    embedding_dim: int,
+    flip_sin_to_cos: bool = False,
+    downscale_freq_shift: float = 1,
+    scale: float = 1,
+    max_period: int = 10000,
+):
+    """
+    This matches the implementation in Denoising Diffusion Probabilistic Models: Create sinusoidal timestep embeddings.
+
+    Args
+        timesteps (torch.Tensor):
+            a 1-D Tensor of N indices, one per batch element. These may be fractional.
+        embedding_dim (int):
+            the dimension of the output.
+        flip_sin_to_cos (bool):
+            Whether the embedding order should be `cos, sin` (if True) or `sin, cos` (if False)
+        downscale_freq_shift (float):
+            Controls the delta between frequencies between dimensions
+        scale (float):
+            Scaling factor applied to the embeddings.
+        max_period (int):
+            Controls the maximum frequency of the embeddings
+    Returns
+        torch.Tensor: an [N x dim] Tensor of positional embeddings.
+    """
+    assert len(timesteps.shape) == 1, "Timesteps should be a 1d-array"
+
+    half_dim = embedding_dim // 2
+    exponent = -math.log(max_period) * torch.arange(
+        start=0, end=half_dim, dtype=torch.float32, device=timesteps.device
+    )
+    exponent = exponent / (half_dim - downscale_freq_shift)
+
+    emb = torch.exp(exponent)
+    emb = timesteps[:, None].float() * emb[None, :]
+
+    # scale embeddings
+    emb = scale * emb
+
+    # concat sine and cosine embeddings
+    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+
+    # flip sine and cosine embeddings
+    if flip_sin_to_cos:
+        emb = torch.cat([emb[:, half_dim:], emb[:, :half_dim]], dim=-1)
+
+    # zero pad
+    if embedding_dim % 2 == 1:
+        emb = torch.nn.functional.pad(emb, (0, 1, 0, 0))
+    return emb
 
 
 class GEGLU(nn.Module):
@@ -272,6 +326,71 @@ class BasicTransformerBlock3D(nn.Module):
         return x
 
 
+class Timesteps(nn.Module):
+    def __init__(self, num_channels: int, flip_sin_to_cos: bool, downscale_freq_shift: float, scale: int = 1):
+        super().__init__()
+        self.num_channels = num_channels
+        self.flip_sin_to_cos = flip_sin_to_cos
+        self.downscale_freq_shift = downscale_freq_shift
+        self.scale = scale
+
+    def forward(self, timesteps):
+        t_emb = get_timestep_embedding(
+            timesteps,
+            self.num_channels,
+            flip_sin_to_cos=self.flip_sin_to_cos,
+            downscale_freq_shift=self.downscale_freq_shift,
+            scale=self.scale,
+        )
+        return t_emb
+
+class TimestepEmbedding(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        time_embed_dim: int,
+        act_fn: str = "silu",
+        out_dim: int = None,
+        post_act_fn: Optional[str] = None,
+        cond_proj_dim=None,
+        sample_proj_bias=True,
+    ):
+        super().__init__()
+
+        self.linear_1 = nn.Linear(in_channels, time_embed_dim, sample_proj_bias)
+
+        if cond_proj_dim is not None:
+            self.cond_proj = nn.Linear(cond_proj_dim, in_channels, bias=False)
+        else:
+            self.cond_proj = None
+
+        self.act = get_activation(act_fn)
+
+        if out_dim is not None:
+            time_embed_dim_out = out_dim
+        else:
+            time_embed_dim_out = time_embed_dim
+        self.linear_2 = nn.Linear(time_embed_dim, time_embed_dim_out, sample_proj_bias)
+
+        if post_act_fn is None:
+            self.post_act = None
+        else:
+            self.post_act = get_activation(post_act_fn)
+
+    def forward(self, sample, condition=None):
+        if condition is not None:
+            sample = sample + self.cond_proj(condition)
+        sample = self.linear_1(sample)
+
+        if self.act is not None:
+            sample = self.act(sample)
+
+        sample = self.linear_2(sample)
+
+        if self.post_act is not None:
+            sample = self.post_act(sample)
+        return sample
+        
 class SpatialTransformer3D(nn.Module):
 
     def __init__(
@@ -312,22 +431,33 @@ class SpatialTransformer3D(nn.Module):
         )
         
         self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
-        
+    
+        self.time_proj = Timesteps(in_channels, True, 0)
 
-    def forward(self, x, context=None, num_frames=1):
+        self.time_pos_embed = TimestepEmbedding(in_channels, in_channels*4, out_dim=in_channels)
+
+    def forward(self, x, context=None, t_emb = None, num_frames=1):
         # note: if no context is given, cross-attention defaults to self-attention
         if not isinstance(context, list):
             context = [context]
         b, c, h, w = x.shape
         x_in = x
+
+        t_emb = self.time_proj(t_emb)
+        t_emb = t_emb.to(dtype=x.dtype)
+        t_emb = self.time_pos_embed(t_emb)
+        t_emb = t_emb[:, None, :]#16,1,320
+
         x = self.norm(x)
         x = rearrange(x, "b c h w -> b (h w) c").contiguous()
+
+        # x = x + t_emb
         x = self.proj_in(x)
         for i, block in enumerate(self.transformer_blocks):
             x = block(x, context=context[i], num_frames=num_frames)
         x = self.proj_out(x)
         x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
-        
+
         return x + x_in
 
 
@@ -433,12 +563,12 @@ class CondSequential(nn.Sequential):
     support it as an extra input.
     """
 
-    def forward(self, x, emb, context=None, num_frames=1):
+    def forward(self, x, emb, context=None, t_emb = None, num_frames=1):
         for layer in self:
             if isinstance(layer, ResBlock):
                 x = layer(x, emb)
             elif isinstance(layer, SpatialTransformer3D):
-                x = layer(x, context, num_frames=num_frames)
+                x = layer(x, context, t_emb, num_frames=num_frames)
             else:
                 x = layer(x)
         return x
@@ -933,6 +1063,11 @@ class MultiViewUNetModel(ModelMixin, ConfigMixin):
             nn.SiLU(),
             zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
         )
+
+        # self.time_proj = Timesteps(in_channels, True, 0)
+
+        # self.time_pos_embed = TimestepEmbedding(in_channels, time_embed_dim, out_dim=in_channels)
+
         if self.predict_codebook_ids:
             self.id_predictor = nn.Sequential(
                 nn.GroupNorm(32, ch),
@@ -971,6 +1106,7 @@ class MultiViewUNetModel(ModelMixin, ConfigMixin):
 
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).to(x.dtype)
 
+
         emb = self.time_embed(t_emb)# torch.Size([8, 1280])
 
         if self.num_classes is not None:
@@ -981,7 +1117,22 @@ class MultiViewUNetModel(ModelMixin, ConfigMixin):
         # Add camera embeddings
         if camera is not None:
             emb = emb + self.camera_embed(camera)
-        
+
+        #add frame time step embedding
+        batch_size = x.shape[0] // num_frames
+        num_frames_emb = torch.arange(num_frames//2).repeat(batch_size*2, 1)
+        num_frames_emb = num_frames_emb.to(x.device)
+        time_steps = num_frames_emb.reshape(-1)
+        # t_emb = self.time_proj(num_frames_emb)
+
+        # `Timesteps` does not contain any weights and will always return f32 tensors
+        # but time_embedding might actually be running in fp16. so we need to cast here.
+        # there might be better ways to encapsulate this.
+        # t_emb = t_emb.to(dtype=x.dtype)
+
+        # t_emb = self.time_pos_embed(t_emb)
+        # t_emb = t_emb[:, None, :]#16,1,9
+
         # imagedream variant
         if self.ip_dim > 0:
             x[(num_frames - 1) :: num_frames, :, :, :] = ip_img # place at [4, 9]
@@ -990,13 +1141,16 @@ class MultiViewUNetModel(ModelMixin, ConfigMixin):
 
         h = x
         for module in self.input_blocks:
-            h = module(h, emb, context, num_frames=num_frames)
+            h = module(h, emb, context, time_steps, num_frames=num_frames)
+            # h = auto_grad_checkpoint(module, h, emb, context, time_steps, num_frames=num_frames)
             hs.append(h)
-        h = self.middle_block(h, emb, context, num_frames=num_frames)
+        h = self.middle_block(h, emb, context, time_steps, num_frames=num_frames)
+        # h = auto_grad_checkpoint(self.middle_block, h, emb, context, time_steps, num_frames=num_frames)
         for module in self.output_blocks:
             hsi = hs.pop()
             h = torch.cat([h, hsi], dim=1)
-            h = module(h, emb, context, num_frames=num_frames)
+            h = module(h, emb, context, time_steps, num_frames=num_frames)
+            # h = auto_grad_checkpoint(module, h, emb, context, time_steps, num_frames=num_frames)
         h = h.type(x.dtype)
         if self.predict_codebook_ids:
             return self.id_predictor(h)

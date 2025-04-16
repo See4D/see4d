@@ -20,6 +20,7 @@ from scipy.ndimage import minimum_filter, maximum_filter
 
 import torch
 import torch.nn.functional as F
+
 from mv_diffusion import mvdream_diffusion_model
 from mv_diffusion_SR import mvdream_diffusion_model as mvdream_diffusion_model_SR
 from transformers import CLIPTextModel, CLIPTokenizer
@@ -106,8 +107,8 @@ else:
     print(mv_unet_path)
     tokenizer = CLIPTokenizer.from_pretrained(base_model_path, subfolder="tokenizer")
 rgb_model = mvdream_diffusion_model(base_model_path,mv_unet_path,tokenizer,seed=12345)
-mv_unet_path = base_model_path + "/unet/SR/ema-checkpoint"
-rgb_model_SR = mvdream_diffusion_model_SR(base_model_path,mv_unet_path,tokenizer,quantization=False,seed=12345)
+# mv_unet_path = base_model_path + "/unet/SR/ema-checkpoint"
+# rgb_model_SR = mvdream_diffusion_model_SR(base_model_path,mv_unet_path,tokenizer,quantization=False,seed=12345)
         
 
 source_imgs_dir = args.source_imgs_dir
