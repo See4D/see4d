@@ -154,7 +154,7 @@ class DiffusionCfg:
     lr_scheduler: str = "constant"
     lr_warmup_steps: int = 500
     conditioning_dropout_prob: float = 0.1
-    use_8bit_adam: bool = False
+    use_8bit_adam: bool = True
     allow_tf32: bool = False
     use_ema: bool = False
     non_ema_revision: str | None = None

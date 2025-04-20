@@ -536,7 +536,8 @@ class MVDreamPipeline(DiffusionPipeline):
         gt_frame: Optional[np.ndarray] = None,
     ):
         gt_num = condition_num_frames
-        
+        # num_inference_steps = 1
+
         self.unet = self.unet.to(device=device)
         self.vae = self.vae.to(device=device)
         self.text_encoder = self.text_encoder.to(device=device)
@@ -575,8 +576,8 @@ class MVDreamPipeline(DiffusionPipeline):
         
         self.image_encoder = self.image_encoder.to(device=device)
         image_embeds_neg, image_embeds_pos = self.encode_image(image, device, num_images_per_prompt) 
-        image_embeds_pos = image_embeds_pos[0:1]#only fetch first image
-        # image_embeds_pos = image_embeds_pos[:gt_num]#only fetch first image
+        # image_embeds_pos = image_embeds_pos[0:1]#only fetch first image
+        image_embeds_pos = image_embeds_pos[:gt_num]#only fetch first image
         
         # import pdb;pdb.set_trace()
         if masks is not None:
@@ -614,8 +615,7 @@ class MVDreamPipeline(DiffusionPipeline):
             latents=None,
         )# shape=[16, 4, 32, 32]
         
-        
-    
+              
         noise_scheduler = self.scheduler
         # if gt_frame is not None:
         #     noise_gt = torch.randn_like(img_latents)
@@ -655,9 +655,9 @@ class MVDreamPipeline(DiffusionPipeline):
                 
                 timestep_warp = (t//time_ratio).long()
                 # timestep_warp = (t).long()
-                noise_warp = torch.randn_like(noisy_latents)
+                # noise_warp = torch.randn_like(noisy_latents)
                 tt = torch.tensor([timestep_warp] * actual_num_frames, dtype=noisy_latents.dtype, device=device)
-                noisy_latents_warp = noise_scheduler.add_noise(img_latents, noise_warp, tt.long())
+                noisy_latents_warp = noise_scheduler.add_noise(img_latents, noisy_latents, tt.long())
 
                 weights = custom_decay_function_weight(tt.float())
 
@@ -685,16 +685,16 @@ class MVDreamPipeline(DiffusionPipeline):
                     latent_model_input = torch.cat([latents] * multiplier)
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                image_embeds_pos_input = image_embeds_pos.repeat(multiplier,1,1)
+                # image_embeds_pos_input = image_embeds_pos.repeat(multiplier,1,1)
 
-                # image_embeds_pos_input = image_embeds_pos.repeat(multiplier*(actual_num_frames//gt_num),1,1)
-                # context = (prompt_embeds.repeat(actual_num_frames,1,1)+ image_embeds_pos_input).to(dtype=latent_model_input.dtype)
+                image_embeds_pos_input = image_embeds_pos.repeat(multiplier*(actual_num_frames//gt_num),1,1)
+                context = (prompt_embeds.repeat(multiplier*actual_num_frames,1,1)+ image_embeds_pos_input).to(dtype=latent_model_input.dtype)
 
                 unet_inputs = {
                     'x': latent_model_input,# torch.Size([num_frames, 5, 32, 32])
                     'timesteps': torch.tensor([t] * actual_num_frames * multiplier, dtype=latent_model_input.dtype, device=device),# torch.Size([num_frames])
-                    'context': (prompt_embeds + image_embeds_pos_input).repeat(actual_num_frames,1,1).to(dtype=latent_model_input.dtype),
-                    # 'context': context,
+                    # 'context': (prompt_embeds + image_embeds_pos_input).repeat(actual_num_frames,1,1).to(dtype=latent_model_input.dtype),
+                    'context': context,
                     'num_frames': actual_num_frames,# 4
                     'camera': None,# 
                 }

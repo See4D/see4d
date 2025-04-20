@@ -30,7 +30,7 @@ from torch.utils.data import RandomSampler, DataLoader
 from tqdm import tqdm
 from einops import rearrange
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 import transformers
 from transformers import CLIPTokenizer
@@ -86,6 +86,8 @@ def init_mvd(args):
         tokenizer = CLIPTokenizer.from_pretrained(base_model_path, subfolder="tokenizer")
     # mv_unet_path = '/data/dylu/project/see4d/outputs/fromscratch_overfit/checkpoint-82000'
     # mv_unet_path = '/data/dylu/project/see4d/outputs/overfit_vis2/checkpoint-4000'
+    # mv_unet_path = '/data/dylu/project/see4d/outputs/overfit_singledata15sample/checkpoint-18000'
+    # mv_unet_path = '/data/dylu/project/see4d/outputs/overfit_15sample_retrain/checkpoint-22000'
     rgb_model = mvdream_diffusion_model(base_model_path,mv_unet_path,tokenizer,seed=12345)
     # mv_net_path = base_model_path + "/unet/SR/ema-checkpoint"
     # rgb_model_SR = mvdream_diffusion_model_SR(base_model_path,mv_unet_path,tokenizer,quantization=False,seed=12345)
@@ -376,8 +378,10 @@ def main(cfg_dict: DictConfig):
         unet.train()
         train_loss = 0.0
 
-        for step, batch in enumerate(train_dataloader):
+        for step, batch in tqdm(enumerate(train_dataloader)):
         # if True:       
+
+            # continue
 
             step_tracker.set_step(global_step)
             
@@ -386,15 +390,16 @@ def main(cfg_dict: DictConfig):
                 #input video is 0 to 1
                 input = batch['video'].to(accelerator.device, dtype = weight_dtype)
 
-                # #add sanity check
+                # # add sanity check
                 # if accelerator.is_main_process:
                 #     os.makedirs(os.path.join(args.output_dir, f"sanity-check"), exist_ok=True)
                 #     sample = input[0].cpu()
                 #     # sample = torch.concat((sample[:,:8] ,sample[:,8:16]), dim = 0)
                 #     save_path = os.path.join(args.output_dir, f"sanity-check/step-{global_step}.png")
-                #     visualize_sample(sample.float(), save_path, batch['view_indices'], batch['frame_indices'])
-
+                #     visualize_sample(sample.float(), save_path, None, None)
+                #     global_step+=1
                 # input = pixel_values[:,:8]
+                
                 batch_size, num_frames, _, height, width = input.shape
 
                 input = rearrange(input, "b f c h w -> (b f) c h w", f=num_frames)
@@ -453,7 +458,7 @@ def main(cfg_dict: DictConfig):
 
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (batch_size,), device=accelerator.device)
                 timesteps = timesteps.long()
-                # timesteps = 900*torch.ones_like(timesteps)
+                # timesteps = 999*torch.ones_like(timesteps)
 
                 timestep_warp = (timesteps//5).long()
                 w_t = get_wt(timestep_warp.float())
@@ -472,8 +477,8 @@ def main(cfg_dict: DictConfig):
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 context_mask = torch.zeros_like(input_mask).to(accelerator.device)
-                context_mask[:, :1] = 1
-                # context_mask[:, :num_frames//2] = 1
+                # context_mask[:, :1] = 1
+                context_mask[:, :num_frames//2] = 1
 
                 # if args.conditioning_dropout_prob is not None and random.random() < args.conditioning_dropout_prob:
                 #     warp_noisy_latents = torch.zeros_like(warp_noisy_latents)
@@ -493,17 +498,17 @@ def main(cfg_dict: DictConfig):
 
                     #encoder input should -1 to 1
                     image_prompt  = rearrange(input, "(b f) c h w -> b f c h w", f=num_frames)
-                    # image_prompt = image_prompt[:,:num_frames//2]
-                    # image_prompt  = rearrange(image_prompt, "b f c h w -> (b f) c h w", f=num_frames//2)
-                    # _, image_embeds_pos = encode_image(image_prompt, accelerator.device, num_frames//2)#8,77,1024
-                    # image_embeds_pos = rearrange(image_embeds_pos, "(b f) l w -> b f l w", f=num_frames//2)
-                    # image_embeds_pos = image_embeds_pos.repeat(1,2,1,1)
+                    image_prompt = image_prompt[:,:num_frames//2]
+                    image_prompt  = rearrange(image_prompt, "b f c h w -> (b f) c h w", f=num_frames//2)
+                    _, image_embeds_pos = encode_image(image_prompt, accelerator.device, num_frames//2)#8,77,1024
+                    image_embeds_pos = rearrange(image_embeds_pos, "(b f) l w -> b f l w", f=num_frames//2)
+                    image_embeds_pos = image_embeds_pos.repeat(1,2,1,1)
 
-                    image_prompt = image_prompt[:,:1]
-                    image_prompt  = rearrange(image_prompt, "b f c h w -> (b f) c h w", f=1)
-                    _, image_embeds_pos = encode_image(image_prompt, accelerator.device, 1)#8,77,1024
-                    image_embeds_pos = rearrange(image_embeds_pos, "(b f) l w -> b f l w", f=1)
-                    image_embeds_pos = image_embeds_pos.repeat(1,num_frames,1,1)
+                    # image_prompt = image_prompt[:,:1]
+                    # image_prompt  = rearrange(image_prompt, "b f c h w -> (b f) c h w", f=1)
+                    # _, image_embeds_pos = encode_image(image_prompt, accelerator.device, 1)#8,77,1024
+                    # image_embeds_pos = rearrange(image_embeds_pos, "(b f) l w -> b f l w", f=1)
+                    # image_embeds_pos = image_embeds_pos.repeat(1,num_frames,1,1)
         
                 latent_model_input = latent_model_input.reshape([batch_size*num_frames, 9, 
                                                                     input_latents.shape[-2], input_latents.shape[-1]])
@@ -524,41 +529,40 @@ def main(cfg_dict: DictConfig):
 
                 # if global_step % 1 == 0:
                         
-                    # extra_step_kwargs = prepare_extra_step_kwargs(None, 0.0, noise_scheduler)
-                    # pred_latents = noise_scheduler.step(
-                    #         model_pred[0,:,:4], timesteps, latent_model_input[:, :4], **extra_step_kwargs, return_dict=False
-                    #     )[1]
+                #     extra_step_kwargs = prepare_extra_step_kwargs(None, 0.0, noise_scheduler)
+                #     pred_latents = noise_scheduler.step(
+                #             model_pred[0,:,:4], timesteps, latent_model_input[:, :4], **extra_step_kwargs, return_dict=False
+                #         )[1]
                 
-                    # pred_latents = 1 / vae.config.scaling_factor * pred_latents
-                    # image = vae.decode(pred_latents.to(vae.dtype)).sample
-                    # image = (image / 2 + 0.5).clamp(0, 1)
-                    # image = image*255.0
-                    # # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
-                    # image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
-                    # image = image.astype(np.uint8)
-                    # imageio.mimwrite(f'visualization/test_output_{global_step}_{timesteps.item()}.mp4', list(image))
+                #     pred_latents = 1 / vae.config.scaling_factor * pred_latents
+                #     image = vae.decode(pred_latents.to(vae.dtype)).sample
+                #     image = (image / 2 + 0.5).clamp(0, 1)
+                #     image = image*255.0
+                #     # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
+                #     image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+                #     image = image.astype(np.uint8)
+                #     imageio.mimwrite(f'visualization/test_output_{step}_{timesteps.item()}.mp4', list(image))
 
-                    # pred_latents = 1 / vae.config.scaling_factor * input_noisy_latents[0]
-                    # image = vae.decode(pred_latents.to(vae.dtype)).sample
-                    # image = (image / 2 + 0.5).clamp(0, 1)
-                    # image = image*255.0
-                    # # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
-                    # image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
-                    # image = image.astype(np.uint8)
-                    # imageio.mimwrite(f'visualization/test_input_{global_step}_{timesteps.item()}.mp4', list(image))
+                #     pred_latents = 1 / vae.config.scaling_factor * input_noisy_latents[0]
+                #     image = vae.decode(pred_latents.to(vae.dtype)).sample
+                #     image = (image / 2 + 0.5).clamp(0, 1)
+                #     image = image*255.0
+                #     # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
+                #     image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+                #     image = image.astype(np.uint8)
+                #     imageio.mimwrite(f'visualization/test_input_{step}_{timesteps.item()}.mp4', list(image))
 
-                    # pred_latents = 1 / vae.config.scaling_factor * warp_noisy_latents[0]
-                    # image = vae.decode(pred_latents.to(vae.dtype)).sample
-                    # image = (image / 2 + 0.5).clamp(0, 1)
-                    # image = image*255.0
-                    # # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
-                    # image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
-                    # image = image.astype(np.uint8)
-                    # imageio.mimwrite(f'visualization/test_warp_{global_step}_{timesteps.item()}.mp4', list(image))
-                    # torch.cuda.empty_cache()
+                #     pred_latents = 1 / vae.config.scaling_factor * warp_noisy_latents[0]
+                #     image = vae.decode(pred_latents.to(vae.dtype)).sample
+                #     image = (image / 2 + 0.5).clamp(0, 1)
+                #     image = image*255.0
+                #     # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
+                #     image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
+                #     image = image.astype(np.uint8)
+                #     imageio.mimwrite(f'visualization/test_warp_{step}_{timesteps.item()}.mp4', list(image))
+                #     torch.cuda.empty_cache()
 
-
-                loss = F.mse_loss(model_pred.float()[:,1:,:4], target.float()[:,1:], reduction="mean") #+ 0.0 * model_pred.float()[:,:,4:].mean()
+                loss = F.mse_loss(model_pred.float()[:,num_frames//2:,:4], target.float()[:,num_frames//2:], reduction="mean") #+ 0.0 * model_pred.float()[:,:,4:].mean()
                 loss += 0.0 * sum(torch.norm(param, p=2) ** 2 for param in unet.parameters())
 
                 # Gather the losses across all processes for logging (if we use distributed training).
@@ -658,6 +662,15 @@ def main(cfg_dict: DictConfig):
                             for dataset_index, evaluation_dataset in enumerate(combined_test):
                             # if True:
 
+                                # dataset_length = len(evaluation_dataset)
+
+                                # for item_index in range(dataset_length):
+                                # # Retrieve the sample at the random index
+                                #     eval_batch = evaluation_dataset[item_index]
+
+                                #     input = eval_batch['video'].to(accelerator.device, dtype = weight_dtype)
+                                #     input = input.unsqueeze(0)
+
                                 eval_sampler = RandomSampler(evaluation_dataset, generator=eval_generator)
                                 evaluation_dataloader = DataLoader(
                                     evaluation_dataset,
@@ -688,7 +701,7 @@ def main(cfg_dict: DictConfig):
                                 input_masks = torch.ones(batch_size, num_frames, 1, height, width).to(accelerator.device, 
                                                                                                         dtype = weight_dtype)
 
-                                gt_num = 1
+                                gt_num = num_frames//2
                                 context_mask = torch.zeros_like(input_masks).to(accelerator.device)
                                 context_mask[:, :gt_num] = 1
 
@@ -764,7 +777,7 @@ def main(cfg_dict: DictConfig):
                                 warp_sample = ((warp+1.0)/2.0).cpu()
                                 # warp_sample = ((warp[8:16]+1.0)/2.0).cpu()
 
-                                save_path = os.path.join(val_save_dir, f"{global_step}-validation-{dataset_name}-see3d.png")
+                                save_path = os.path.join(val_save_dir, f"{dataset_name}-validation-{global_step}-see4d.png")
                                 visualize_sample(sample.float(), save_path, 
                                                     None, None, warp_sample.float(), images_predict_batch)
 

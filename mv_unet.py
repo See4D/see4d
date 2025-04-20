@@ -451,7 +451,7 @@ class SpatialTransformer3D(nn.Module):
         x = self.norm(x)
         x = rearrange(x, "b c h w -> b (h w) c").contiguous()
 
-        # x = x + t_emb
+        x = x + t_emb
         x = self.proj_in(x)
         for i, block in enumerate(self.transformer_blocks):
             x = block(x, context=context[i], num_frames=num_frames)

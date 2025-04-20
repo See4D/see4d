@@ -102,21 +102,19 @@ class Base4DDataset(Dataset):
         self.index_file = os.path.join(root, dataset_name, index_file)
         with open(self.index_file, 'r') as f:
             self.ids = json.load(f) # list of sequence ids
-        # self.pose_list_file = os.path.join('data', dataset_name, f'index_{split}_pose.json')
-        # with open(self.pose_list_file, 'r') as f:
-        #     self.pose_list = json.load(f) # list of sequence ids
+        self.pose_list_file = os.path.join('data', dataset_name, f'index_{split}_pose.json')
+        with open(self.pose_list_file, 'r') as f:
+            self.pose_list = json.load(f) # list of sequence ids
         self.num_frames_sample = num_frames_sample
         self.target_resolution = target_resolution
         self.num_videos = VIEWS[dataset_name]
 
-        # self.neighbor_map = {}
-        # for seq in self.ids:
-        #     sorted_views = self.pose_list[seq]
-        #     self.neighbor_map[seq] = {}
-        #     for v in range(self.num_videos):
-        #         self.neighbor_map[seq][v] = get_two_nearest(sorted_views, v)
-
-        self.newdataset_root = '/dataset/dylu/data/Sync4D'
+        self.neighbor_map = {}
+        for seq in self.ids:
+            sorted_views = self.pose_list[seq]
+            self.neighbor_map[seq] = {}
+            for v in range(self.num_videos):
+                self.neighbor_map[seq][v] = get_two_nearest(sorted_views, v)
 
     def __len__(self):
         return len(self.ids)
@@ -126,37 +124,30 @@ class Base4DDataset(Dataset):
         seq = self.ids[idx]
         # load & cache
 
-        video_dir = os.path.join(self.newdataset_root, self.dataset_name, self.split, seq+'.npy')
-
-        video = np.load(video_dir)/255.0
-        video = torch.from_numpy(video).float()  # now in [0,1]
+        video_dir = os.path.join(self.root, self.dataset_name)
+        video = load_video(video_dir, seq, self.target_resolution, self.num_videos)
 
         v, f, c, H, W = video.shape
         cond_view = random.randrange(v)
+        # nearest neighbors precomputed
+        neighbors = self.neighbor_map[seq][cond_view]
+        target_view = random.choice(neighbors)
+        interval = random.choice([1, 2])
 
-        video_sample = video[cond_view]  # [f, c, H, W]
+        max_start = f - interval * (self.num_frames_sample - 1)
+        start = random.randrange(max_start)
+        # tensorized frame indices
+        frames = torch.arange(self.num_frames_sample, dtype=torch.long) * interval + start
 
-        if H != self.target_resolution[0] or W != self.target_resolution[1]:
-            video_sample = F.interpolate(video_sample, size=self.target_resolution, mode="bilinear", align_corners=False)
-
-
-        # # nearest neighbors precomputed
-        # neighbors = self.neighbor_map[seq][cond_view]
-        # target_view = random.choice(neighbors)
-        # interval = random.choice([1, 2])
-
-        # max_start = f - interval * (self.num_frames_sample - 1)
-        # start = random.randrange(max_start)
-        # # tensorized frame indices
-        # frames = torch.arange(self.num_frames_sample, dtype=torch.long) * interval + start
-
-        # # advanced indexing: select views then frames
-        # views = torch.tensor([cond_view, target_view], dtype=torch.long)
-        # clip = video.index_select(0, views).index_select(1, frames)  # [2, T, c, H, W]
-        # clip = clip.reshape(-1, c, H, W)  # [2*T, c, H, W]
+        # advanced indexing: select views then frames
+        views = torch.tensor([cond_view, target_view], dtype=torch.long)
+        clip = video.index_select(0, views).index_select(1, frames)  # [2, T, c, H, W]
+        clip = clip.reshape(-1, c, H, W)  # [2*T, c, H, W]
 
         return {
-            "video": video_sample
+            "video": clip,
+            "view_indices": views.tolist(),
+            "frame_indices": frames.tolist(),
         }
 
 
