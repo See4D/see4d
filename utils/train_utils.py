@@ -46,7 +46,7 @@ def read_train_imgs(path, height=512, width=512):
         condition_pixel_values[i] = img_normalized
     return condition_pixel_values.unsqueeze(0)
 
-def mask_pixels(batch_images,  min_width: int = 50, max_width: int = 200):
+def mask_pixels(batch_images,  min_width: int = 20, max_width: int = 120):
     N, C, H, W = batch_images.shape
 
     # Create an empty mask batch
@@ -73,9 +73,9 @@ def mask_pixels(batch_images,  min_width: int = 50, max_width: int = 200):
     masks = torch.from_numpy(masks_np).unsqueeze(1).to(batch_images.device, dtype = batch_images.dtype)
 
     # Apply mask to images (multiplication)
-    processed_images = (1.0 + batch_images) * masks / 2.0  # Keeps image values in [-1,1] range
+    processed_images = (batch_images) * masks   # Keeps image values in [-1,1] range
 
-    return processed_images * 2.0 - 1.0, masks
+    return processed_images, masks
 
 def read_imgs(path, frame_id):
     source_imgs_dir = os.path.join(path, f"frame_{frame_id}", 'reference_images')#/dataset/htx/see4d/warps/outputs/cat_reverse_k3/frame_$i

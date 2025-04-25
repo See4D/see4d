@@ -5,7 +5,7 @@ defaults:
 wandb:
   project: See4d
   entity: nuslud
-  name: test
+  name: overfit4d_see3dmask
   mode: online
   id: null
 
@@ -94,7 +94,7 @@ diffusion:
   lr_warmup_steps: 0
   seed: null # this will help to auto restart the code with different data
   mixed_precision: "fp16"
-  validation_steps: 100
+  validation_steps: 1
   num_validation_images: 5
   output_dir: "/data/dylu/project/see4d/outputs"
   num_workers: ${data_loader.train.num_workers}

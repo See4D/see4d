@@ -30,7 +30,7 @@ from torch.utils.data import RandomSampler, DataLoader
 from tqdm import tqdm
 from einops import rearrange
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import transformers
 from transformers import CLIPTokenizer
@@ -57,6 +57,7 @@ from mv_diffusion import mvdream_diffusion_model
 # from src.dataset.data_module import worker_init_fn
 from src.dataset.sampler import MultiNomialRandomSampler, ConcatDatasetWithIndex
 from src.dataset.see4d_dataloader import get_combined_dataset, visualize_sample
+from src.evaluation.metrics import compute_psnr_np, compute_ssim_np, compute_lpips_np
 from utils.train_utils import mask_pixels, read_train_imgs, prepare_extra_step_kwargs, worker_init_fn
 
 with install_import_hook(
@@ -77,17 +78,15 @@ def init_mvd(args):
     base_model_path = args.base_model_path
 
     if(single_view):
-        mv_unet_path = base_model_path + "/unet/single/ema-checkpoint"
+        mv_unet_path = base_model_path + "/unet/single/ema-checkpoint" if args.pretrain_unet is None else args.pretrain_unet
         print(mv_unet_path)
         tokenizer = CLIPTokenizer.from_pretrained(base_model_path, subfolder="tokenizer")
     else:
         mv_unet_path = base_model_path + "/unet/sparse/ema-checkpoint" if args.pretrain_unet is None else args.pretrain_unet
         print(mv_unet_path)
         tokenizer = CLIPTokenizer.from_pretrained(base_model_path, subfolder="tokenizer")
-    # mv_unet_path = '/data/dylu/project/see4d/outputs/fromscratch_overfit/checkpoint-82000'
-    # mv_unet_path = '/data/dylu/project/see4d/outputs/overfit_vis2/checkpoint-4000'
-    # mv_unet_path = '/data/dylu/project/see4d/outputs/overfit_singledata15sample/checkpoint-18000'
-    # mv_unet_path = '/data/dylu/project/see4d/outputs/overfit_15sample_retrain/checkpoint-22000'
+    mv_unet_path = '/data/dylu/project/see4d/outputs/overfit4d_see3dmask/server'
+    print(f'use unet path: {mv_unet_path}')
     rgb_model = mvdream_diffusion_model(base_model_path,mv_unet_path,tokenizer,seed=12345)
     # mv_net_path = base_model_path + "/unet/SR/ema-checkpoint"
     # rgb_model_SR = mvdream_diffusion_model_SR(base_model_path,mv_unet_path,tokenizer,quantization=False,seed=12345)
@@ -290,7 +289,7 @@ def main(cfg_dict: DictConfig):
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(
-       len(train_dataloader) / args.gradient_accumulation_steps)
+       len(train_dataloader) / (args.gradient_accumulation_steps*accelerator.num_processes))
     # num_update_steps_per_epoch = 1000
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
@@ -379,7 +378,6 @@ def main(cfg_dict: DictConfig):
         train_loss = 0.0
 
         for step, batch in tqdm(enumerate(train_dataloader)):
-        # if True:       
 
             # continue
 
@@ -404,26 +402,23 @@ def main(cfg_dict: DictConfig):
 
                 input = rearrange(input, "b f c h w -> (b f) c h w", f=num_frames)
                 # input = input * 2 - 1
-                masks = torch.zeros(((batch_size*num_frames), 1, height, width), 
-                                    dtype=input.dtype, device=input.device)
-                masks[..., :width//2] = 1.0
+                # masks = torch.zeros(((batch_size*num_frames), 1, height, width), 
+                #                     dtype=input.dtype, device=input.device)
+                # masks[..., :width//2] = 1.0
 
-                warp = input * masks
+                # warp = input * masks
 
-                # warp, masks = mask_pixels(input)#-1 to 1 
+                warp, masks = mask_pixels(input)#-1 to 1 
 
                 # sanity check for warp image
                 # if accelerator.is_main_process:
-                #     sample = (input/255.0).cpu()
-                #     warp_sample = (warp/255.0).cpu()
+                #     sample = (input[:num_frames]).cpu()
+                #     warp_sample = (warp[:num_frames]).cpu()
                 #     os.makedirs(os.path.join(args.output_dir, f"sanity-check"), exist_ok=True)
                 #     save_path = os.path.join(args.output_dir, f"sanity-check/step-{global_step}-warp.png")
                 #     visualize_sample(warp_sample.float(), save_path, None, None)
                 #     save_path = os.path.join(args.output_dir, f"sanity-check/step-{global_step}.png")
                 #     visualize_sample(sample.float(), save_path, None, None)
-
-                # input = input / 127.5 - 1
-                # warp = warp / 127.5 - 1
 
                 input = input * 2 - 1
                 warp = warp * 2 - 1
@@ -462,10 +457,11 @@ def main(cfg_dict: DictConfig):
 
                 timestep_warp = (timesteps//5).long()
                 w_t = get_wt(timestep_warp.float())
-                w_t = w_t.view(w_t.shape[0], 1, 1, 1).to(weight_dtype)
+                w_t = w_t.view(w_t.shape[0], 1, 1, 1, 1).to(weight_dtype)
 
                 noise = torch.randn_like(input_latents)
-                warp_noisy_latents = noise_scheduler.add_noise(warp_latents, noise, timestep_warp)
+                noise_warp = torch.randn_like(input_latents)
+                warp_noisy_latents = noise_scheduler.add_noise(warp_latents, noise_warp, timestep_warp)
                 input_noisy_latents = noise_scheduler.add_noise(input_latents, noise, timesteps)
                 warp_noisy_latents = w_t * warp_noisy_latents + (1 - w_t) * input_noisy_latents
 
@@ -480,10 +476,10 @@ def main(cfg_dict: DictConfig):
                 # context_mask[:, :1] = 1
                 context_mask[:, :num_frames//2] = 1
 
-                # if args.conditioning_dropout_prob is not None and random.random() < args.conditioning_dropout_prob:
-                #     warp_noisy_latents = torch.zeros_like(warp_noisy_latents)
-                #     mask_latents_zero = torch.zeros_like(mask_latents)
-                #     mask_latents = mask_latents_zero * (1 - context_mask) + mask_latents * context_mask
+                if args.conditioning_dropout_prob is not None and random.random() < args.conditioning_dropout_prob:
+                    warp_noisy_latents = torch.zeros_like(warp_noisy_latents)
+                    mask_latents_zero = torch.zeros_like(mask_latents)
+                    mask_latents = mask_latents_zero * (1 - context_mask) + mask_latents * context_mask
 
                 input_noisy_latents = input_noisy_latents*(1-context_mask) + input_latents*context_mask
                 warp_noisy_latents = warp_noisy_latents*(1-context_mask) + input_latents*context_mask
@@ -517,9 +513,10 @@ def main(cfg_dict: DictConfig):
                 condition_embeds = rearrange(condition_embeds, "b f l w -> (b f) l w", f=num_frames)#.detach()
                 condition_embeds = condition_embeds.to(dtype=weight_dtype)
 
+                timesteps = timesteps.repeat_interleave(num_frames).to(latent_model_input.dtype)
                 unet_inputs = {
                     'x': latent_model_input.detach(),# torch.Size([num_frames, 5, 32, 32])
-                    'timesteps': torch.tensor(timesteps, dtype=latent_model_input.dtype),# torch.Size([num_frames])
+                    'timesteps': timesteps,
                     'context': condition_embeds.detach(),#.to(unet.device),
                     'num_frames': num_frames,# 4
                     'camera': None,#
@@ -651,7 +648,7 @@ def main(cfg_dict: DictConfig):
                             str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
                         ):  
                             
-                            combined_test = get_combined_dataset(args.dataset_root, split="train")
+                            combined_test = get_combined_dataset(args.dataset_root, split="test")
                             
                             # input = pixel_values[:,:8]
 
@@ -659,7 +656,9 @@ def main(cfg_dict: DictConfig):
                             eval_generator = torch.Generator()
                             eval_generator.manual_seed(fixed_seed)
 
-                            for dataset_index, evaluation_dataset in enumerate(combined_test):
+                            # for dataset_index, evaluation_dataset in enumerate(combined_test):
+                            for evaluation_dataset in [combined_test[2]]:
+                                dataset_index=2
                             # if True:
 
                                 # dataset_length = len(evaluation_dataset)
@@ -671,6 +670,7 @@ def main(cfg_dict: DictConfig):
                                 #     input = eval_batch['video'].to(accelerator.device, dtype = weight_dtype)
                                 #     input = input.unsqueeze(0)
 
+                                psnr_list, lpips_list, ssim_list = [], [], []
                                 eval_sampler = RandomSampler(evaluation_dataset, generator=eval_generator)
                                 evaluation_dataloader = DataLoader(
                                     evaluation_dataset,
@@ -681,105 +681,111 @@ def main(cfg_dict: DictConfig):
                                     worker_init_fn=worker_init_fn
                                 )
 
-                                eval_batch = next(iter(evaluation_dataloader))
+                                # eval_batch = next(iter(evaluation_dataloader))
 
-                                input = eval_batch['video'].to(accelerator.device, dtype = weight_dtype)
+                                for idx, eval_batch in enumerate(evaluation_dataloader):
+                                    # eval_batch = next(iter(evaluation_dataloader))
 
-                                batch_size, num_frames, _, height, width = input.shape
+                                    input = eval_batch['video'].to(accelerator.device, dtype = weight_dtype)
 
-                                input = rearrange(input, "b f c h w -> (b f) c h w", f=num_frames)
+                                    batch_size, num_frames, _, height, width = input.shape
 
-                                masks = torch.zeros(((batch_size*num_frames), 1, height, width), 
-                                                    dtype=input.dtype, device=input.device)
-                                masks[..., :width//2] = 1.0
+                                    input = rearrange(input, "b f c h w -> (b f) c h w", f=num_frames)
+                                    
+                                    warp, masks = mask_pixels(input)#-1 to 1
 
-                                warp = input * masks
+                                    # if accelerator.is_main_process:
+                                    #     sample = (input[:num_frames]).cpu()
+                                    #     warp_sample = (warp[:num_frames]).cpu()
+                                    #     os.makedirs(os.path.join(args.output_dir, f"sanity-check"), exist_ok=True)
+                                    #     save_path = os.path.join(args.output_dir, f"sanity-check/step-test-{global_step}-warp.png")
+                                    #     visualize_sample(warp_sample.float(), save_path, None, None)
+                                    #     save_path = os.path.join(args.output_dir, f"sanity-check/step-test-{global_step}.png")
+                                    #     visualize_sample(sample.float(), save_path, None, None)
 
-                                input = input * 2 - 1
-                                warp = warp * 2 - 1
+                                    # masks = torch.zeros(((batch_size*num_frames), 1, height, width), 
+                                    #                     dtype=input.dtype, device=input.device)
+                                    # masks[..., :width//2] = 1.0
 
-                                input_masks = torch.ones(batch_size, num_frames, 1, height, width).to(accelerator.device, 
-                                                                                                        dtype = weight_dtype)
+                                    # warp = input * masks
 
-                                gt_num = num_frames//2
-                                context_mask = torch.zeros_like(input_masks).to(accelerator.device)
-                                context_mask[:, :gt_num] = 1
+                                    input = input * 2 - 1
+                                    warp = warp * 2 - 1
 
-                                input_masks = rearrange(input_masks, "b f c h w -> (b f) c h w", f=num_frames)
-                                context_mask = rearrange(context_mask, "b f c h w -> (b f) c h w", f=num_frames)
+                                    input_masks = torch.ones(batch_size, num_frames, 1, height, width).to(accelerator.device, 
+                                                                                                            dtype = weight_dtype)
 
-                                # warp, masks = mask_pixels(input)#-1 to 1 
+                                    gt_num = num_frames//2
+                                    context_mask = torch.zeros_like(input_masks).to(accelerator.device)
+                                    context_mask[:, :gt_num] = 1
 
-                                original_input = input.clone()
-                                condition_pixel_values = warp*(1-context_mask) + input*context_mask
-                                masks_pixel_values = masks*(1-context_mask) + input_masks*context_mask
+                                    input_masks = rearrange(input_masks, "b f c h w -> (b f) c h w", f=num_frames)
+                                    context_mask = rearrange(context_mask, "b f c h w -> (b f) c h w", f=num_frames)
+
+                                    # warp, masks = mask_pixels(input)#-1 to 1 
+
+                                    original_input = input.clone()
+                                    condition_pixel_values = warp*(1-context_mask) + input*context_mask
+                                    masks_pixel_values = masks*(1-context_mask) + input_masks*context_mask
+
+                                    batch = {
+                                            'conditioning_pixel_values': condition_pixel_values,
+                                            'masks': masks_pixel_values,
+                                            'input': original_input,
+                                    }
+
+                                    prompt = ['']
+                                    images_predict_batch = rgb_model.inference_next_frame(prompt,batch,num_frames,
+                                                                                            height,width,gt_num,output_type='pil')
+                                    
+                                    dataset_name = dataset_list[dataset_index]
+                                    # dataset_name = 'overfit'
+                                    sample = ((input+1.0)/2.0).cpu()
+                                    # sample = torch.stack((sample[:8] ,sample[8:16]), dim = 0)
+                                    
+                                    warp_sample = ((warp+1.0)/2.0).cpu()
+                                    # warp_sample = ((warp[8:16]+1.0)/2.0).cpu()
+                                    
+                                    #evaluation
+                                    pred_imgs = np.array(images_predict_batch[gt_num:]).transpose(0,3,1,2)
+
+                                    gt_imgs = np.array(sample[gt_num:])
+
+                                    psnr = compute_psnr_np( 
+                                        ground_truth=gt_imgs,
+                                        predicted=pred_imgs,
+                                    ).mean()
+
+                                    ssim = compute_ssim_np(
+                                        ground_truth=gt_imgs,
+                                        predicted=pred_imgs,
+                                    ).mean()
+
+                                    lpips = compute_lpips_np(
+                                        ground_truth=gt_imgs,
+                                        predicted=pred_imgs,
+                                        device = accelerator.device,
+                                    ).mean()
 
 
-                                # context_mask = torch.ones_like(context_mask).to(accelerator.device)
-                                # condition_pixel_values = input*context_mask
-                                # masks_pixel_values = input_masks*context_mask
+                                    print(f"{dataset_name} sample: PSNR {psnr}")
+                                    print(f"{dataset_name} sample: LPIPS {lpips}")
+                                    print(f"{dataset_name} sample: SSIM {ssim}")
 
-                                # save to dataset/dataset/{dataset_list[dataset_index]}/{gloal_step}
-                                # save_path = os.path.join(f'dataset/dataset/{dataset_list[dataset_index]}/{global_step}')
-                                # save_path = os.path.join(f'dataset/dataset/overfit/{global_step}')
-                                # input_save_path = os.path.join(save_path, "input_images")
-                                # os.makedirs(input_save_path, exist_ok=True)
-                                # input_image = ((input+1.0)/2.0).permute(0,2,3,1).cpu().numpy()
-                                # for i in range((num_frames)):
-                                #     input_vis = input_image[i]
-                                #     #to bgr
-                                #     input_vis = (input_vis * 255.0).astype(np.uint8)
-                                #     input_vis = cv2.cvtColor(input_vis, cv2.COLOR_RGB2BGR)
-                                #     cv2.imwrite(os.path.join(input_save_path, f"image_{i}.png"), input_vis)
+                                    save_path = os.path.join(val_save_dir, f"{dataset_name}-validation-{idx}-see4d.png")
+                                    visualize_sample(sample.float(), save_path, 
+                                                        None, None, warp_sample.float(), images_predict_batch)
 
-                                # #save reference image
-                                # reference = condition_pixel_values[0]
-                                # reference = ((reference+1.0)/2.0).permute(1, 2, 0).cpu().numpy()
-                                # reference = (reference * 255.0).astype(np.uint8)
-                                # reference_save_path = os.path.join(save_path, "reference_images")
-                                # #to bgr
-                                # reference = cv2.cvtColor(reference, cv2.COLOR_RGB2BGR)
-                                # os.makedirs(reference_save_path, exist_ok=True)
-                                # cv2.imwrite(os.path.join(reference_save_path, f"reference.png"), reference)
+                                    psnr_list.append(psnr)
+                                    lpips_list.append(lpips)
+                                    ssim_list.append(ssim)
 
-                                # #save warp image and mask
-                                # warp_image = condition_pixel_values[1:]
-                                # warp_image = ((warp_image+1.0)/2.0).permute(0,2,3,1).cpu().numpy()
-                                # masks_image = masks_pixel_values[1:]
-                                # #mask is from 0-1, expand mask to 3 channels, save mask
-                                # masks_image = masks_image.permute(0,2,3,1).cpu().numpy()
-                                # masks_image = np.repeat(masks_image, 3, axis=-1)
-                                # warp_save_path = os.path.join(save_path, "warp_images")
-                                # os.makedirs(warp_save_path, exist_ok=True)
-                                # for i in range(len(warp_image)):
-                                #     warp_vis = warp_image[i]
-                                #     #to bgr
-                                #     warp_vis = (warp_vis * 255.0).astype(np.uint8)
-                                #     warp_vis = cv2.cvtColor(warp_vis, cv2.COLOR_RGB2BGR)
-                                #     cv2.imwrite(os.path.join(warp_save_path, f"warp_{i}.png"), warp_vis)
-                                #     cv2.imwrite(os.path.join(warp_save_path, f"mask_{i}.png"), masks_image[i]*255.0)
-
-                                batch = {
-                                        'conditioning_pixel_values': condition_pixel_values,
-                                        'masks': masks_pixel_values,
-                                        'input': original_input,
-                                }
-
-                                prompt = ['']
-                                images_predict_batch = rgb_model.inference_next_frame(prompt,batch,num_frames,
-                                                                                        height,width,gt_num,output_type='pil')
-                                
-                                dataset_name = dataset_list[dataset_index]
-                                # dataset_name = 'overfit'
-                                sample = ((input+1.0)/2.0).cpu()
-                                # sample = torch.stack((sample[:8] ,sample[8:16]), dim = 0)
-                                
-                                warp_sample = ((warp+1.0)/2.0).cpu()
-                                # warp_sample = ((warp[8:16]+1.0)/2.0).cpu()
-
-                                save_path = os.path.join(val_save_dir, f"{dataset_name}-validation-{global_step}-see4d.png")
-                                visualize_sample(sample.float(), save_path, 
-                                                    None, None, warp_sample.float(), images_predict_batch)
+                                psnr_list = np.array(psnr_list).mean()
+                                lpips_list = np.array(lpips_list).mean()
+                                ssim_list = np.array(ssim_list).mean()
+                                print(f"{dataset_name} all sample: PSNR {psnr_list}")
+                                print(f"{dataset_name} all sample: LPIPS {lpips_list}")
+                                print(f"{dataset_name} all sample: SSIM {ssim_list}")
 
                         torch.cuda.empty_cache()
                         unet.train()

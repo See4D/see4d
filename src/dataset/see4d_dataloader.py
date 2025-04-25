@@ -292,8 +292,8 @@ def visualize_sample(
         # Expecting images_predict_batch to be a list of images with length equal to num_frames.
         for j in range(num_frames):
             img = images_predict_batch[j]
-            if hasattr(img, "convert"):
-                img = np.array(img)/255.0
+            # if hasattr(img, "convert"):
+            #     img = np.array(img)/255.0
                 # img = np.array(img)
             axes[current_row][j].imshow(img)
             axes[current_row][j].axis("off")

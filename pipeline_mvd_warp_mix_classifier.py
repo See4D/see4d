@@ -596,7 +596,7 @@ class MVDreamPipeline(DiffusionPipeline):
         prompt_embeds = self._encode_prompt(
             prompt=prompt,
             device=device,
-            num_images_per_prompt=num_images_per_prompt,
+            num_images_per_prompt=num_frames,
             do_classifier_free_guidance=do_classifier_free_guidance,
             negative_prompt=negative_prompt,
         )  # type: ignore torch.Size([1, 77, 1024])
@@ -654,10 +654,9 @@ class MVDreamPipeline(DiffusionPipeline):
                 latents = torch.cat([img_latents[:gt_num], latents[gt_num:]], dim=0)# [6, 4, 32, 32]
                 
                 timestep_warp = (t//time_ratio).long()
-                # timestep_warp = (t).long()
-                # noise_warp = torch.randn_like(noisy_latents)
+                noise_warp = torch.randn_like(noisy_latents)
                 tt = torch.tensor([timestep_warp] * actual_num_frames, dtype=noisy_latents.dtype, device=device)
-                noisy_latents_warp = noise_scheduler.add_noise(img_latents, noisy_latents, tt.long())
+                noisy_latents_warp = noise_scheduler.add_noise(img_latents, noise_warp, tt.long())
 
                 weights = custom_decay_function_weight(tt.float())
 
@@ -672,7 +671,8 @@ class MVDreamPipeline(DiffusionPipeline):
                 elif self.unet.input_blocks[0].__dict__['_modules']['0'].__dict__['in_channels'] == 5:
                     latents = torch.cat([latents, mask_latents], dim=1)# [b*f, c, h, w] shape=[6, 9, 32, 32]
 
-                
+                image_embeds_pos_input = image_embeds_pos.repeat(multiplier*(actual_num_frames//gt_num),1,1)
+
                 if do_classifier_free_guidance:
                     
                     unc_mix_latents_warp = torch.cat([img_latents[:gt_num], uncond_img_latents[gt_num:]], dim=0) 
@@ -684,16 +684,15 @@ class MVDreamPipeline(DiffusionPipeline):
                 else:
                     latent_model_input = torch.cat([latents] * multiplier)
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
                 # image_embeds_pos_input = image_embeds_pos.repeat(multiplier,1,1)
-
-                image_embeds_pos_input = image_embeds_pos.repeat(multiplier*(actual_num_frames//gt_num),1,1)
-                context = (prompt_embeds.repeat(multiplier*actual_num_frames,1,1)+ image_embeds_pos_input).to(dtype=latent_model_input.dtype)
+                context = (prompt_embeds + image_embeds_pos_input).to(dtype=latent_model_input.dtype)
+                # image_embeds_pos_input = image_embeds_pos.repeat(multiplier*(actual_num_frames//gt_num),1,1)
+                # context = (prompt_embeds.repeat(multiplier*actual_num_frames,1,1)+ image_embeds_pos_input).to(dtype=latent_model_input.dtype)
 
                 unet_inputs = {
                     'x': latent_model_input,# torch.Size([num_frames, 5, 32, 32])
                     'timesteps': torch.tensor([t] * actual_num_frames * multiplier, dtype=latent_model_input.dtype, device=device),# torch.Size([num_frames])
-                    # 'context': (prompt_embeds + image_embeds_pos_input).repeat(actual_num_frames,1,1).to(dtype=latent_model_input.dtype),
+                    # 'context': (prompt_embeds + ima~ge_embeds_pos_input).repeat(actual_num_frames,1,1).to(dtype=latent_model_input.dtype),
                     'context': context,
                     'num_frames': actual_num_frames,# 4
                     'camera': None,# 
@@ -752,7 +751,7 @@ class MVDreamPipeline(DiffusionPipeline):
             noisy_latents_warp = noisy_latents_warp
         elif output_type == "pil":
             image = self.decode_latents(latents)
-            image = self.numpy_to_pil(image)
+            # image = self.numpy_to_pil(image)
             # image_warp = self.decode_latents(noisy_latents_warp)
             # image_warp = self.numpy_to_pil(image_warp)
 
