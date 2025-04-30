@@ -1,7 +1,6 @@
 import os
 import json
 import random
-import cv2
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
@@ -9,9 +8,6 @@ import numpy as np
 from einops import rearrange
 import matplotlib.pyplot as plt
 from decord import VideoReader
-
-from src.dataset.recammaster import TextVideoDataset
-from utils.train_utils import random_edge_mask
 
 VIEWS = {
     'syncam4d': 36,
@@ -89,43 +85,6 @@ def load_video(video_dir, id, target_resolution=(256, 384), num_videos=36, backg
 
     return video
 
-def compute_edge_band_variable(
-    mask_vol: np.ndarray,
-    pad_in_range: tuple[int,int]  = (1,40),
-    pad_out_range: tuple[int,int] = (1,40),
-) -> np.ndarray:
-    """
-    For each slice in mask_vol (V,F,H,W), pick random pad_in ∈ pad_in_range
-    and pad_out ∈ pad_out_range, then build a band of exactly pad_in px
-    inside + pad_out px outside the object boundary.
-
-    Returns a uint8 volume (V,F,H,W) with 1s in that band, 0 elsewhere.
-    """
-    F, H, W = mask_vol.shape
-    edge_band = np.zeros_like(mask_vol, dtype=np.uint8)
-
-    for f in range(F):
-        m = (mask_vol[f] > 0).astype(np.uint8)
-
-        pad_in  = random.randint(*pad_in_range)
-        pad_out = random.randint(*pad_out_range)
-
-        # structuring elements
-        k_in  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*pad_in + 1, 2*pad_in + 1))
-        k_out = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*pad_out + 1, 2*pad_out + 1))
-
-        # inner band: foreground minus its eroded version
-        inner = cv2.subtract(m, cv2.erode(m, k_in))
-
-        # outer band: dilated version minus the original
-        outer = cv2.subtract(cv2.dilate(m, k_out), m)
-
-        # combine
-        band = cv2.bitwise_or(inner, outer)
-        edge_band[f] = band
-
-    return edge_band
-
 # --- Base Dataset Class for 4D Data ---
 class Base4DDataset(Dataset):
     def __init__(self, root, dataset_name, split="train", num_frames_sample=8, target_resolution=(256,384)):
@@ -143,17 +102,22 @@ class Base4DDataset(Dataset):
         self.index_file = os.path.join(root, dataset_name, index_file)
         with open(self.index_file, 'r') as f:
             self.ids = json.load(f) # list of sequence ids
-
+        # print('======================================================load index file====')
+        # self.pose_list_file = os.path.join('data', dataset_name, f'index_{split}_pose.json')
+        # with open(self.pose_list_file, 'r') as f:
+        #     self.pose_list = json.load(f) # list of sequence ids
         self.num_frames_sample = num_frames_sample
         self.target_resolution = target_resolution
         self.num_videos = VIEWS[dataset_name]
 
-        self.npy_dataset_root = os.path.join(root, 'alldata', dataset_name, split)
-        self.mask_dataset_root = os.path.join(root, 'alldata', dataset_name, f'{split}_mask', 'mask')
+        # self.neighbor_map = {}
+        # for seq in self.ids:
+        #     sorted_views = self.pose_list[seq]
+        #     self.neighbor_map[seq] = {}
+        #     for v in range(self.num_videos):
+        #         self.neighbor_map[seq][v] = get_two_nearest(sorted_views, v)
 
-        self.pose_weight_matrix_path = os.path.join(root, 'alldata', f'pose_matrix_{split}_{dataset_name}.npz')
-
-        self.pose_weight_matrix = None
+        self.npy_dataset_root = os.path.join(root, 'npy')
 
     def __len__(self):
         return len(self.ids)
@@ -161,59 +125,40 @@ class Base4DDataset(Dataset):
     def __getitem__(self, idx):
 
         seq = self.ids[idx]
+        # load & cache
 
-        if self.pose_weight_matrix is None:
-            self.pose_weight_matrix = np.load(
-                self.pose_weight_matrix_path,
-                allow_pickle=False
-            )
+        video_dir = os.path.join(self.npy_dataset_root, self.dataset_name, self.split, seq+'.npy')
+        # print(f'we load data from {video_dir}')
 
-        weight_matrix = self.pose_weight_matrix[seq]
-        source_view = random.randrange(self.num_videos)
-        target_view_index = random.randint(1, 2)
-        target_view = weight_matrix[source_view, target_view_index]
+        video = np.load(video_dir)/255.0
+        video = torch.from_numpy(video).float()  # now in [0,1]
 
-        source_view_file = os.path.join(self.npy_dataset_root, f'{seq}_{source_view}.npy')
-        target_view_file = os.path.join(self.npy_dataset_root, f'{seq}_{target_view}.npy')
-        target_mask_file = os.path.join(self.mask_dataset_root, f'{seq}_mask_{target_view}.npy')
+        v, f, c, H, W = video.shape
+        cond_view = random.randrange(v)
 
-        source_video = np.load(source_view_file)/255.0
-        source_video = torch.from_numpy(source_video).float()  # now in [0,1]
-
-        target_video = np.load(target_view_file)/255.0
-        target_video = torch.from_numpy(target_video).float()  # now in [0,1] 
-
-        target_mask = np.load(target_mask_file)
-        # target_mask = torch.from_numpy(target_mask).float()  # now in [0,1]
-
-        f, c, H, W = source_video.shape
-
-        max_interval = 6 if self.num_videos == 36 else 3
-        interval = random.randint(1, max_interval)
-
-        max_start = f - interval * (self.num_frames_sample - 1)
-        start = random.randrange(max_start)
-        frames = torch.arange(self.num_frames_sample, dtype=torch.long) * interval + start
-
-        source_video = source_video.index_select(0, frames)
-        target_video = target_video.index_select(0, frames)
-
-        target_mask = target_mask[frames]
-        target_mask = 1-compute_edge_band_variable(target_mask)
-        target_mask = torch.from_numpy(target_mask).float()
-        target_mask = target_mask[:,None]
+        video_sample = video[cond_view]  # [f, c, H, W]
 
         if H != self.target_resolution[0] or W != self.target_resolution[1]:
-            source_video = F.interpolate(source_video, size=self.target_resolution, mode="bilinear", align_corners=False)
-            target_video = F.interpolate(target_video, size=self.target_resolution, mode="bilinear", align_corners=False)
-            target_mask = F.interpolate(target_mask, size=self.target_resolution, mode="bilinear", align_corners=False)
+            video_sample = F.interpolate(video_sample, size=self.target_resolution, mode="bilinear", align_corners=False)
 
-        target_mask = random_edge_mask(target_mask)
-        video_sample = torch.concat([source_video, target_video], dim=0)
+
+        # # nearest neighbors precomputed
+        # neighbors = self.neighbor_map[seq][cond_view]
+        # target_view = random.choice(neighbors)
+        # interval = random.choice([1, 2])
+
+        # max_start = f - interval * (self.num_frames_sample - 1)
+        # start = random.randrange(max_start)
+        # # tensorized frame indices
+        # frames = torch.arange(self.num_frames_sample, dtype=torch.long) * interval + start
+
+        # # advanced indexing: select views then frames
+        # views = torch.tensor([cond_view, target_view], dtype=torch.long)
+        # clip = video.index_select(0, views).index_select(1, frames)  # [2, T, c, H, W]
+        # clip = clip.reshape(-1, c, H, W)  # [2*T, c, H, W]
 
         return {
-            "video": video_sample,
-            "target_mask": target_mask,
+            "video": video_sample
         }
 
 
@@ -269,15 +214,8 @@ def get_combined_dataset(root, split="train", num_frames_sample=8, target_resolu
     dataset_syncam = Syncam4DDataset(root, split, num_frames_sample, target_resolution)
     dataset_kubric = Kubric4DDataset(root, split, num_frames_sample, target_resolution)
     dataset_obj4d = Obj4D10kDataset(root, split, num_frames_sample, target_resolution)
-    dataset_recammaster = TextVideoDataset(
-        data_root=os.path.join('/fs-computility/llm/shared/konglingdong/data/sets/see4d/MultiCamVideo-Dataset/MultiCamVideo-Dataset'),
-        split='train',
-        num_frames_sample=num_frames_sample, 
-        frame_interval=6,
-        target_resolution=target_resolution
-    )
     # combined = ConcatDataset([dataset_syncam, dataset_kubric, dataset_obj4d])
-    return [dataset_syncam, dataset_kubric, dataset_obj4d, dataset_recammaster]
+    return [dataset_syncam, dataset_kubric, dataset_obj4d]
 
 # # --- Visualization Function ---
 # def visualize_sample(sample, save_path="visualization.png", view_indices=None, frame_indices=None):
@@ -356,8 +294,8 @@ def visualize_sample(
         # Expecting images_predict_batch to be a list of images with length equal to num_frames.
         for j in range(num_frames):
             img = images_predict_batch[j]
-            # if hasattr(img, "convert"):
-            #     img = np.array(img)/255.0
+            if hasattr(img, "convert"):
+                img = np.array(img)/255.0
                 # img = np.array(img)
             axes[current_row][j].imshow(img)
             axes[current_row][j].axis("off")

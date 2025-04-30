@@ -5,7 +5,7 @@ defaults:
 wandb:
   project: See4d
   entity: nuslud
-  name: test
+  name: 4d_train_withrecam
   mode: online
   id: null
 
@@ -19,7 +19,7 @@ data_loader:
   train:
     num_workers: 16
     persistent_workers: true
-    batch_size: 1
+    batch_size: 2
     seed: 1234
   test:
     num_workers: 4
@@ -67,7 +67,7 @@ trainer:
 output_dir: null
 
 diffusion: 
-  dataset_root: "/dataset/yyzhao/Sync4D"
+  dataset_root: "/fs-computility/llm/shared/konglingdong/data/sets/see4d/sync4d"
   conditioning_dropout_prob: 0.1
   single_view: True
   train_super_resolution: False
@@ -88,22 +88,21 @@ diffusion:
   num_frames: 14
   width: 512
   height: 512
-  checkpointing_steps: 2000
+  checkpointing_steps: 1000
   checkpoints_total_limit: 1
   learning_rate: 1.0e-5
   lr_warmup_steps: 0
   seed: null # this will help to auto restart the code with different data
   mixed_precision: "fp16"
-  validation_steps: 100
+  validation_steps: 500
   num_validation_images: 5
-  output_dir: "/data/dylu/project/see4d/outputs"
+  output_dir: "outputs"
   num_workers: ${data_loader.train.num_workers}
   resume_from_checkpoint: latest
 
   datasets_cfg:
     type: "single"
-    prob: [3.0, 3.0, 1.0] 
-    # prob: [1.0] 
+    prob: [3.0, 3.0, 1.0, 5.0] 
     datasets:
       - name: ${dataset.name}
         image_shape: ${dataset.image_shape}

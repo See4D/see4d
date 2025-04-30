@@ -17,22 +17,7 @@ VIEWS = {
     'obj4d-10k': 18,
 }
 
-def get_two_nearest(sorted_views, cond_view):
-
-    n = len(sorted_views)
-    idx = sorted_views.index(cond_view)
-    neighbors = []
-    # try offsets in order: immediately before, immediately after, two before, two after
-    for offset in (-1, +1, -2, +2):
-        j = idx + offset
-        if 0 <= j < n:
-            neighbors.append(sorted_views[j])
-        if len(neighbors) == 2:
-            break
-    return neighbors
-
-def load_video(video_dir, id, num_videos, neighbor_map, 
-               samples=10, num_frames_sample=8):
+def load_video(video_dir, id, num_videos):
     # Construct paths
     video_path = os.path.join(video_dir, 'videos', id + ".mp4")
 
@@ -68,27 +53,7 @@ def load_video(video_dir, id, num_videos, neighbor_map,
         video = rearrange(video, "v f h w c -> v f c h w")
     
     v, f, c, H, W = video.shape
-
-    clip_list = []
-    for idx in range(samples):
-        cond_view = random.randrange(v)
-        # nearest neighbors precomputed
-        neighbors = neighbor_map[id][cond_view]
-        target_view = random.choice(neighbors)
-        interval = random.choice([1, 2])
-
-        max_start = f - interval * (num_frames_sample - 1)
-        start = random.randrange(max_start)
-        # tensorized frame indices
-        frames = torch.arange(num_frames_sample, dtype=torch.long) * interval + start
-
-        # advanced indexing: select views then frames
-        views = torch.tensor([cond_view, target_view], dtype=torch.long)
-        clip = video.index_select(0, views).index_select(1, frames)  # [2, T, c, H, W]
-        clip = clip.reshape(-1, c, H, W)  # [2*T, c, H, W]
-        clip_list.append(clip)
-
-    video = 255.0*torch.stack(clip_list, dim=0) 
+    video = 255.0 * video
 
     if num_videos == 36:  # syncam4d
         v, f, c, H, W = video.shape
@@ -100,55 +65,60 @@ def load_video(video_dir, id, num_videos, neighbor_map,
 
     return video.numpy().astype(np.uint8)
 
-def process_split(dataset_root, save_root, dataset_name, split, samples=5):
-    video_dir = os.path.join(dataset_root, dataset_name)
-    num_videos = VIEWS[dataset_name]
-    # load IDs & poses
-    with open(os.path.join(video_dir, f"index_{split}.json"), 'r') as f:
-        ids = json.load(f)
-    with open(os.path.join('/data/dylu/project/see4d/data', dataset_name, f"index_{split}_pose.json"), 'r') as f:
-        pose_list = json.load(f)
-    # build neighbor_map once
-    neighbor_map = {
-        seq: {
-            v: get_two_nearest(pose_list[seq], v)
-            for v in range(num_videos)
-        }
-        for seq in ids
-    }
-
-    out_dir = os.path.join(save_root, dataset_name, split)
+def process_id_batch(
+    video_dir: str,
+    out_dir: str,
+    ids_batch: list[str],
+    num_videos: int
+):
     os.makedirs(out_dir, exist_ok=True)
+    for seq_id in tqdm(ids_batch):
+        arr = load_video(video_dir, seq_id, num_videos)
+        for idx in range(arr.shape[0]):
+            one_view_video = arr[idx]
+            np.save(os.path.join(out_dir, f"{seq_id}_{idx}.npy"), one_view_video)
 
-    for seq_id in tqdm(ids,
-                       desc=f"{dataset_name}/{split}",
-                       unit="video",
-                       total=len(ids)):
-        arr = load_video(video_dir, seq_id, num_videos, neighbor_map, samples)
-        np.save(os.path.join(out_dir, f"{seq_id}.npy"), arr)
-
-
-
-if __name__ == "__main__":
-    dataset_root = "/dataset/yyzhao/Sync4D"
-    save_root    = "/dataset/dylu/data/Sync4D"
-    # dataset_list = ['syncam4d', 'kubric4d', 'obj4d-10k']
-    dataset_list = ['obj4d-10k']
+def main():
+    dataset_root = "/fs-computility/llm/shared/konglingdong/data/sync4d"
+    save_root    = "/fs-computility/llm/shared/konglingdong/data/sync4d/alldata"
+    dataset_list = ['syncam4d', 'kubric4d']
+    # dataset_list = ['obj4d-10k']
     splits       = ['train']
 
-    # launch one process per (dataset, split)
-    jobs = []
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as exe:
+    # for each (ds, split)
+    for ds in dataset_list:
         for split in splits:
-            for ds in dataset_list:
-                jobs.append(
-                    exe.submit(
-                        partial(process_split, dataset_root, save_root, ds, split)
-                    )
-                )
+            video_dir = os.path.join(dataset_root, ds)
+            out_dir   = os.path.join(save_root, ds, split)
 
-        # optional: wait for all to finish, you can suppress this bar if you like
-        for fut in tqdm(as_completed(jobs),
-                        total=len(jobs),
-                        desc="All splits"):
-            fut.result()
+            # load seq IDs and pose‑based neighbor map
+            with open(os.path.join(video_dir, f"index_{split}.json")) as f:
+                ids = json.load(f)
+
+            num_videos = VIEWS[ds]
+
+            # split IDs into roughly one chunk per CPU
+            n_cpus = 128
+            id_batches = np.array_split(ids, n_cpus)
+
+            # launch a pool of workers, each handling one batch of IDs
+            with ProcessPoolExecutor(max_workers=n_cpus) as exe:
+                jobs = []
+                for batch in id_batches:
+                    jobs.append(
+                        exe.submit(
+                            partial(
+                                process_id_batch,
+                                video_dir,
+                                out_dir,
+                                batch.tolist(),
+                                num_videos
+                            )
+                        )
+                    )
+                # optional: track progress
+                for _ in tqdm(jobs, desc=f"{ds}/{split}", unit="chunk"):
+                    _.result()
+
+if __name__ == "__main__":
+    main()

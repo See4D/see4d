@@ -46,7 +46,7 @@ def read_train_imgs(path, height=512, width=512):
         condition_pixel_values[i] = img_normalized
     return condition_pixel_values.unsqueeze(0)
 
-def mask_pixels(batch_images,  min_width: int = 50, max_width: int = 200):
+def mask_pixels(batch_images,  min_width: int = 20, max_width: int = 100):
     N, C, H, W = batch_images.shape
 
     # Create an empty mask batch
@@ -73,9 +73,9 @@ def mask_pixels(batch_images,  min_width: int = 50, max_width: int = 200):
     masks = torch.from_numpy(masks_np).unsqueeze(1).to(batch_images.device, dtype = batch_images.dtype)
 
     # Apply mask to images (multiplication)
-    processed_images = (1.0 + batch_images) * masks / 2.0  # Keeps image values in [-1,1] range
+    processed_images = batch_images * masks   # Keeps image values in [-1,1] range
 
-    return processed_images * 2.0 - 1.0, masks
+    return processed_images, masks
 
 def read_imgs(path, frame_id):
     source_imgs_dir = os.path.join(path, f"frame_{frame_id}", 'reference_images')#/dataset/htx/see4d/warps/outputs/cat_reverse_k3/frame_$i
@@ -169,3 +169,53 @@ def prepare_extra_step_kwargs(generator, eta, noise_scheduler):
 def worker_init_fn(worker_id: int) -> None:
     random.seed(int(torch.utils.data.get_worker_info().seed) % (2**32 - 1))
     np.random.seed(int(torch.utils.data.get_worker_info().seed) % (2**32 - 1))
+
+
+def random_edge_mask(batch_masks, max_frac=0.25):
+    """
+    Randomly zero-out bands along up to four image edges,
+    using the **same** mask for every image in the batch.
+
+    Parameters
+    ----------
+    batch_masks : torch.Tensor
+        Shape (N, 1, H, W). Will be **modified in-place**.
+    max_frac : float
+        Maximum band width as a fraction of the spatial size (≤ 0.5).  
+        Default 0.25 → up to 512/4 = 128 px when H=W=512.
+    seed : int | None
+        Optional RNG seed for reproducibility.
+    """
+
+    N, _, H, W = batch_masks.shape
+    assert H == W, "Only square inputs assumed here"
+    max_band = int(H * max_frac)
+
+    # --- 1. Decide which edges to mask -------------------------------------
+    edges = ["top", "bottom", "left", "right"]
+    k      = random.randint(1, len(edges))          # how many edges to mask
+    chosen = random.sample(edges, k)
+
+    # --- 2. Build a single boolean mask ------------------------------------
+    # start with all ones (keep)
+    edge_mask = torch.ones(1, 1, H, W, dtype=torch.bool,
+                           device=batch_masks.device)
+
+    for edge in chosen:
+        band = random.randint(0, max_band)          # width in pixels
+        if band == 0:
+            continue                                # nothing to do
+        if edge == "top":
+            edge_mask[:, :, :band, :] = False
+        elif edge == "bottom":
+            edge_mask[:, :, -band:, :] = False
+        elif edge == "left":
+            edge_mask[:, :, :, :band] = False
+        elif edge == "right":
+            edge_mask[:, :, :, -band:] = False
+
+    # --- 3. Apply it to every image in the batch ---------------------------
+    # broadcast  (1,1,H,W)  → (N,1,H,W)
+    batch_masks.masked_fill_(~edge_mask, 0)
+
+    return batch_masks      # optionally return the mask for inspection
