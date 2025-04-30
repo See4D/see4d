@@ -46,7 +46,7 @@ def read_train_imgs(path, height=512, width=512):
         condition_pixel_values[i] = img_normalized
     return condition_pixel_values.unsqueeze(0)
 
-def mask_pixels(batch_images,  min_width: int = 20, max_width: int = 120):
+def mask_pixels(batch_images,  min_width: int = 20, max_width: int = 150):
     N, C, H, W = batch_images.shape
 
     # Create an empty mask batch

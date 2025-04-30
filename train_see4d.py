@@ -30,7 +30,7 @@ from torch.utils.data import RandomSampler, DataLoader
 from tqdm import tqdm
 from einops import rearrange
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import transformers
 from transformers import CLIPTokenizer
@@ -57,6 +57,7 @@ from mv_diffusion import mvdream_diffusion_model
 # from src.dataset.data_module import worker_init_fn
 from src.dataset.sampler import MultiNomialRandomSampler, ConcatDatasetWithIndex
 from src.dataset.see4d_dataloader import get_combined_dataset, visualize_sample
+from src.dataset.iphone import iPhoneDataset
 from src.evaluation.metrics import compute_psnr_np, compute_ssim_np, compute_lpips_np
 from utils.train_utils import mask_pixels, read_train_imgs, prepare_extra_step_kwargs, worker_init_fn
 
@@ -85,8 +86,8 @@ def init_mvd(args):
         mv_unet_path = base_model_path + "/unet/sparse/ema-checkpoint" if args.pretrain_unet is None else args.pretrain_unet
         print(mv_unet_path)
         tokenizer = CLIPTokenizer.from_pretrained(base_model_path, subfolder="tokenizer")
-    mv_unet_path = '/data/dylu/project/see4d/outputs/overfit4d_see3dmask/server'
-    print(f'use unet path: {mv_unet_path}')
+
+    # mv_unet_path = 'outputs/4d_ourmask'
     rgb_model = mvdream_diffusion_model(base_model_path,mv_unet_path,tokenizer,seed=12345)
     # mv_net_path = base_model_path + "/unet/SR/ema-checkpoint"
     # rgb_model_SR = mvdream_diffusion_model_SR(base_model_path,mv_unet_path,tokenizer,quantization=False,seed=12345)
@@ -377,8 +378,12 @@ def main(cfg_dict: DictConfig):
         unet.train()
         train_loss = 0.0
 
-        for step, batch in tqdm(enumerate(train_dataloader)):
+        for step, batch in enumerate(train_dataloader):     
 
+            # if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
+            #     if step % args.gradient_accumulation_steps == 0:
+            #         progress_bar.update(1)
+            #     continue
             # continue
 
             step_tracker.set_step(global_step)
@@ -387,28 +392,35 @@ def main(cfg_dict: DictConfig):
 
                 #input video is 0 to 1
                 input = batch['video'].to(accelerator.device, dtype = weight_dtype)
+                target_mask = batch['target_mask'].to(accelerator.device, dtype = weight_dtype)
 
                 # # add sanity check
                 # if accelerator.is_main_process:
                 #     os.makedirs(os.path.join(args.output_dir, f"sanity-check"), exist_ok=True)
                 #     sample = input[0].cpu()
-                #     # sample = torch.concat((sample[:,:8] ,sample[:,8:16]), dim = 0)
                 #     save_path = os.path.join(args.output_dir, f"sanity-check/step-{global_step}.png")
                 #     visualize_sample(sample.float(), save_path, None, None)
                 #     global_step+=1
-                # input = pixel_values[:,:8]
+
+                #     print(global_step)
+                # continue
                 
                 batch_size, num_frames, _, height, width = input.shape
 
+                condition_masks = torch.ones_like(target_mask).to(accelerator.device, dtype = weight_dtype)
+                masks = torch.concat([condition_masks, target_mask], dim=1)
+
                 input = rearrange(input, "b f c h w -> (b f) c h w", f=num_frames)
-                # input = input * 2 - 1
+                masks = rearrange(masks, "b f c h w -> (b f) c h w", f=num_frames)
+                warp = input * masks
+
                 # masks = torch.zeros(((batch_size*num_frames), 1, height, width), 
                 #                     dtype=input.dtype, device=input.device)
                 # masks[..., :width//2] = 1.0
 
                 # warp = input * masks
 
-                warp, masks = mask_pixels(input)#-1 to 1 
+                # warp, masks = mask_pixels(input)#-1 to 1 
 
                 # sanity check for warp image
                 # if accelerator.is_main_process:
@@ -419,6 +431,8 @@ def main(cfg_dict: DictConfig):
                 #     visualize_sample(warp_sample.float(), save_path, None, None)
                 #     save_path = os.path.join(args.output_dir, f"sanity-check/step-{global_step}.png")
                 #     visualize_sample(sample.float(), save_path, None, None)
+                # global_step+=1
+                # continue
 
                 input = input * 2 - 1
                 warp = warp * 2 - 1
@@ -648,8 +662,8 @@ def main(cfg_dict: DictConfig):
                             str(accelerator.device).replace(":0", ""), enabled=accelerator.mixed_precision == "fp16"
                         ):  
                             
-                            combined_test = get_combined_dataset(args.dataset_root, split="test")
-                            
+                            # combined_test = get_combined_dataset(args.dataset_root, split="test")
+                            test_dataset = iPhoneDataset()
                             # input = pixel_values[:,:8]
 
                             fixed_seed = 42
@@ -657,8 +671,8 @@ def main(cfg_dict: DictConfig):
                             eval_generator.manual_seed(fixed_seed)
 
                             # for dataset_index, evaluation_dataset in enumerate(combined_test):
-                            for evaluation_dataset in [combined_test[2]]:
-                                dataset_index=2
+                            for evaluation_dataset in [test_dataset]:
+                                # dataset_index=2
                             # if True:
 
                                 # dataset_length = len(evaluation_dataset)
@@ -671,6 +685,7 @@ def main(cfg_dict: DictConfig):
                                 #     input = input.unsqueeze(0)
 
                                 psnr_list, lpips_list, ssim_list = [], [], []
+                                img_list, target_list, warp_list, pred_list = [], [], [], []
                                 eval_sampler = RandomSampler(evaluation_dataset, generator=eval_generator)
                                 evaluation_dataloader = DataLoader(
                                     evaluation_dataset,
@@ -688,11 +703,33 @@ def main(cfg_dict: DictConfig):
 
                                     input = eval_batch['video'].to(accelerator.device, dtype = weight_dtype)
 
+                                    target_mask = eval_batch['target_mask'].to(accelerator.device, dtype = weight_dtype)
+
+                                    target = eval_batch['target'].to(accelerator.device, dtype = weight_dtype)
+
+                                    # # add sanity check
+                                    # if accelerator.is_main_process:
+                                    #     os.makedirs(os.path.join(args.output_dir, f"sanity-check"), exist_ok=True)
+                                    #     sample = input[0].cpu()
+                                    #     save_path = os.path.join(args.output_dir, f"sanity-check/step-{global_step}.png")
+                                    #     visualize_sample(sample.float(), save_path, None, None)
+                                    #     global_step+=1
+
+                                    #     print(global_step)
+                                    # continue
+                                    
                                     batch_size, num_frames, _, height, width = input.shape
 
+                                    input = torch.concat([input[:,:num_frames//2], target], dim=1)
+
+                                    condition_masks = torch.ones_like(target_mask).to(accelerator.device, dtype = weight_dtype)
+                                    masks = torch.concat([condition_masks, target_mask], dim=1)
+
                                     input = rearrange(input, "b f c h w -> (b f) c h w", f=num_frames)
+                                    masks = rearrange(masks, "b f c h w -> (b f) c h w", f=num_frames)
+                                    warp = input * masks
                                     
-                                    warp, masks = mask_pixels(input)#-1 to 1
+                                    # warp, masks = mask_pixels(input)#-1 to 1
 
                                     # if accelerator.is_main_process:
                                     #     sample = (input[:num_frames]).cpu()
@@ -738,18 +775,18 @@ def main(cfg_dict: DictConfig):
                                     images_predict_batch = rgb_model.inference_next_frame(prompt,batch,num_frames,
                                                                                             height,width,gt_num,output_type='pil')
                                     
-                                    dataset_name = dataset_list[dataset_index]
+                                    dataset_name = 'iphone'
                                     # dataset_name = 'overfit'
                                     sample = ((input+1.0)/2.0).cpu()
                                     # sample = torch.stack((sample[:8] ,sample[8:16]), dim = 0)
-                                    
+                                    sample = torch.concat((sample[:8], target[0].cpu()), dim = 0)
                                     warp_sample = ((warp+1.0)/2.0).cpu()
                                     # warp_sample = ((warp[8:16]+1.0)/2.0).cpu()
                                     
                                     #evaluation
                                     pred_imgs = np.array(images_predict_batch[gt_num:]).transpose(0,3,1,2)
 
-                                    gt_imgs = np.array(sample[gt_num:])
+                                    gt_imgs = np.array(target[0].cpu())
 
                                     psnr = compute_psnr_np( 
                                         ground_truth=gt_imgs,
@@ -772,9 +809,36 @@ def main(cfg_dict: DictConfig):
                                     print(f"{dataset_name} sample: LPIPS {lpips}")
                                     print(f"{dataset_name} sample: SSIM {ssim}")
 
-                                    save_path = os.path.join(val_save_dir, f"{dataset_name}-validation-{idx}-see4d.png")
-                                    visualize_sample(sample.float(), save_path, 
-                                                        None, None, warp_sample.float(), images_predict_batch)
+
+                                    image = sample[:num_frames//2]*255.0
+                                    image = image.permute(0, 2, 3, 1).float().numpy()
+                                    image = image.astype(np.uint8)
+                                    save_path = os.path.join(val_save_dir, f"{dataset_name}-video-{idx}-source.mp4")
+                                    imageio.mimwrite(save_path, list(image))
+                                    img_list.extend(list(image))
+
+                                    image = sample[num_frames//2:]*255.0
+                                    image = image.permute(0, 2, 3, 1).float().numpy()
+                                    image = image.astype(np.uint8)
+                                    save_path = os.path.join(val_save_dir, f"{dataset_name}-video-{idx}-target.mp4")
+                                    imageio.mimwrite(save_path, list(image))
+                                    target_list.extend(list(image))
+
+                                    image = warp_sample[num_frames//2:]*255.0
+                                    image = image.permute(0, 2, 3, 1).float().numpy()
+                                    image = image.astype(np.uint8)
+                                    save_path = os.path.join(val_save_dir, f"{dataset_name}-video-{idx}-warp.mp4")
+                                    imageio.mimwrite(save_path, list(image))
+                                    warp_list.extend(list(image))
+                                
+                                    image = images_predict_batch[num_frames//2:]*255.0
+                                    image = image.astype(np.uint8)
+                                    save_path = os.path.join(val_save_dir, f"{dataset_name}-video-{idx}-predict.mp4")
+                                    imageio.mimwrite(save_path, list(image))
+                                    pred_list.extend(list(image))
+
+                                    # visualize_sample(sample.float(), save_path, 
+                                    #                     None, None, warp_sample.float(), images_predict_batch)
 
                                     psnr_list.append(psnr)
                                     lpips_list.append(lpips)
@@ -786,6 +850,15 @@ def main(cfg_dict: DictConfig):
                                 print(f"{dataset_name} all sample: PSNR {psnr_list}")
                                 print(f"{dataset_name} all sample: LPIPS {lpips_list}")
                                 print(f"{dataset_name} all sample: SSIM {ssim_list}")
+
+                                save_path = os.path.join(val_save_dir, f"{dataset_name}-video-warp.mp4")
+                                imageio.mimwrite(save_path, img_list)
+                                save_path = os.path.join(val_save_dir, f"{dataset_name}-video-target.mp4")
+                                imageio.mimwrite(save_path, target_list)
+                                save_path = os.path.join(val_save_dir, f"{dataset_name}-video-predict.mp4")
+                                imageio.mimwrite(save_path, pred_list)
+                                save_path = os.path.join(val_save_dir, f"{dataset_name}-video-source.mp4")
+                                imageio.mimwrite(save_path, img_list)
 
                         torch.cuda.empty_cache()
                         unet.train()
